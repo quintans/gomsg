@@ -1,0 +1,124 @@
+Server BUS
+==========
+As mensagens são entregues debaixo de tópicos (tipo de mensagem). As mensagens de um topico têm todas a mesma estrutura de dados.
+
+Mensagem:
+---------
++Kind: NONE, REQUEST, REPLY, ERROR
++msgId: message id for this connection
++msgUTC: UTC
++topic: Topic Name: /systemA/North
++headers: map[string]string
++payload: bytes (encode/decode)
+?+brokerId:
+?+senderId:
+?+CRC:
+
+1 fase)
+#Publish/Subscribe#
+x O cliente regista-se no servidor.
+x O Servidor recebe registo e cria thread para escutar pedidos do cliente.
+x O Cliente indica qual o grupo de mensagens que quer escutar.
+x O servidor regista debaixo do grupo de mensagens, os clientes que respeitam a regra
+x O Cliente envia mensagem (publish)
+x O Servidor lê a mensagem e reenvia a mensagem (broadcast) para todos os clientes interessados, em novas threads.
+x O cliente tenta religar-se sempre que a ligação é interrompida
+
+2 fase)
+#Request/Reply (single/multiple)#
+. single Reply (só interessa a resposta de um dos providers)
+----------------
+Cenário: Vários providers para um determinado serviço, em que cada um tem um conjunto de informação distinta mas que formam um todo, e só um deve responder com a informação.
+ex: DTCs estão instalados em dois polos isolados, e existem uma terceira parte que quer informação sobre um DTC, mas não sabe a que polo pertence o DTC.
+
+x Um evento chega ao broker
+x O broker pergunta aos providers especificos se estão interessados em responder - ASK:<EVENT_NAME>
+x Os providers respondem "true" se estão interessados ou "false" se não
+x Às respostas "false" não é dado seguimento
+x O primeiro cliente a responder "true", será o que irá processar o request, sendo-lhe enviado o REQUEST.
+x Se não houver resposta do cliente (timeout ou outro), usa-se o cliente seguinte.
+x Após uma resposta com sucesso, as respostas "true" dos restantes clientes serão ignoradas.
+
+. multiple Reply
+----------------
+as respostas dos vários providers são entregues à callback ao mesmo tempo na forma de uma array.
+
+Os mesmos passos do single Reply até ao ponto 4, inlusivé.
+x as repostas intermedias são identificadas como tal e a ultima resposta é uma resposta normal (identifica o fim).
+x O requerente acumula as várias respostas numa array, até receber a ultima resposta.
+x Entrega a array à callback.
+x O requerente remove a callback
+
+3 fase)
+#Cluster#
+- Um cluster é constituido por vários brokers (nós), tendo à frente um balanceador de carga (NLB)
+- Quando um cliente ligado a um broker subescreve um tópico, esse broker anuncia-se aos outros brokers como subscriber desse tópico.
+- Um broker vê outro broker como sendo um cliente normal.
+
+4 fase)
+#PERSISTENCIA DE EVENTOS#
+- Um broker pode ter um mirror (nó que vai ter uma replica dos eventos e o registos dos clientes)
+- Um broker guarda numa lista os eventos entregues (só os marcados para serem persistidos), por um periodo de tempo máximo (ex: 1 dia).
+  Um broker também mantém uma relação dos clientes ligados e o ultimo evento entregue.
+  As relações com os clientes são eliminadas assim que o seu ultimo evento sai da cache por timeout.
+  Os eventos mais antigos que o ultimo evento do cliente mais antigo também são eliminados.
+- Quando uma mensagem é entregue com sucesso a um broker - ocorrendo replica do evento para o mirror - este envia um ACK ao cliente indicando que tudo correu bem.
+- Um evento de mirror não provoca broadcast.
+
+NOTA: para registar as mensagens usar buckets de ficheiros em vez de BD, ja que a persistencia é linear. 
+Os ficheiros irão servir somente de backup para os dados em memória.
+Para guardar a referencia dos clientes usa-se um ficheiro de escrita random em que os clientes invalidados são subrescritos pelo cliente na ultima posição. A seguir reduz-se o tamanho do ficheiro eliminando-se a ultima entrada (que já foi copiada no passo anterior).
+    
+NOTA: PARA REQUEST/REPLY, NÃO HÁ PERSISTENCIA DAS MENSAGENS. SE UM NÓ DO CAMINHO FALHA, TODO O PROCESSO FALHA (TIMEOUT). É NECESSÁRIO TENTAR OUTRA VEZ.
+	
+Casos de uso:
+» Clinte novo liga-se a um broker:
+	- Um cliente liga-se a um broker, recebe deste um id e fica a ouvir eventos.
+
+» Um cliente antigo retorna:
+	- O cliente liga-se a um broker novo ou o mesmo. Se o broker não é o mesmo, o broker novo pergunta aos outros brokers para enviarem todos os eventos pendentes para este cliente. Após envio com sucesso o cliente é dereferenciado do broker antigo. Estes eventos não são registados na cache do broker novo. Enquanto esta operação ocorre, os eventos novos para o cliente ficam pendentes.
+
+- Um broker mirror fica online: 
+	- Pede ao seu mirror os eventos (juntamente com os clientes) desde o seu cliente mais antigo e guarda em cache (Nota podemos estar a falar de GBs).
+
+- Um broker fica offline imediatamente a seguir a receber uma mensagem e enviar o ACK ao cliente.
+	- O broker mirror, apercebe-se da falha envia ele a mensagem. (também envia uma mensagem de alarme sobre o broker que ficou offline)
+
+- As comunicações entre brokers, relacionadas com operações do cluster, são feitos num porto diferente da comunicação dos eventos.
+- No que respeita à troca de eventos, os nós são vistos como clientes uns dos outros. 
+	As mensagens reenviadas aos brokers têm que levar a indicação que dali, só podem seguir para clientes. Ou seja, entre brokers, só pode haver UM reencaminhamento, eliminando o risco de as mensagens circularem em loop inifinito entre os clusters.
+- Um nó ao ficar online procura contactar todos os nós previamente configurados.
+	* Assim que fica online começa a escutar.
+	* tenta estabelecer contacto com um dos nós previamente configurados.  
+	* se o nó ao qual está a tentar contactar entretanto também estabeleceu uma ligação (os dois ficaram online ao mesmo tempo), tenta-se novamente.
+	DETALHE:
+		O broker A fica à escuta.
+		Locked list {	
+			O broker A antes de estabelecer contacto com o broker B, verifica a sua lista se existe contacto registado do broker B, não avancando se existe.
+			O broker A regista na sua lista de contactos como pendente a sua ligação com o broker B.
+		}
+		Contacto COM o broker B.
+		Locked {
+			Se o broker A recebe OK do broker B esta ligação passa a ser válida.
+			Se o broker A recebe NOK do broker B, A desliga-se de B, remove a entrada nos contactos.
+			Se o broker A recebe RETRY do broker B, A desliga-se de B, remove a entrada nos contactos, espera por um periodo aleatório, e tenta novamente.
+		}
+
+		Contacto DO broker B
+		Locked contact list {
+			Verifica a lista de contactos pelo boker B.
+			Se não o encontra envia OK, e regista B.
+			Se o encontra activo envia NOK, e desliga-se de B
+			Se o encontra pendente envia RETRY, e desliga-se de B
+		}
+
+==============================================
+	
+Melhorias:
+- O grupo de mensagens pode ser hierarquico. 
+	ex: escutar mensagens do tipo "/state/machine/*" indica interesse em escutar mensagens que comecem por "/state/machine/".
+- As mensagens podem ter scope: Local, Remoto ou Global
+	Local: só mensagens para clients registados no mesmo nó.
+	Remoto: ...
+	Global: ...
+- Aplicar autenticação/autorização

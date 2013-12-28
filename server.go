@@ -16,7 +16,7 @@ const (
 	ASK_CMD    = "ask:"              // prefix for asking if client can accept a request
 	PUB_CMD    = "pub:"              // prefix for publishing messages
 	REG_CMD    = "reg:"              // prefix for registering an endpoint for subscriptions and requests
-	CMD_REGS   = "cmd:registrations" // prefix for asking the client for its subscriptions and requests replyers
+	CMD_REGS   = "cmd:registrations" // prefix for registering the client's subscriptions and requests replyers
 	REQONE_CMD = "reqone:"           // prefix for requesting for only one reply of one of the producers
 	REQALL_CMD = "reqall:"           // prefix for requesting for all the replies of all of the producers
 )

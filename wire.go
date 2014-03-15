@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"reflect"
 	"sync"
 	"time"
 )
@@ -129,6 +128,11 @@ func (this *Wire) read(connection net.Conn) (err error) {
 
 	for {
 		msg := &Communication{}
+		// reads Communication version protocol: 1, 2, ...
+		msg.Version, err = reader.ReadUI8()
+		if err != nil {
+			return
+		}
 		// reads Communication kind: request, reply, none
 		var k uint8
 		k, err = reader.ReadUI8()
@@ -152,6 +156,12 @@ func (this *Wire) read(connection net.Conn) (err error) {
 		nsecs := (msecs % 1e3) * 1e6
 		msg.Timestamp = time.Unix(int64(secs), int64(nsecs))
 
+		// reads Action type: ACT_ASK, ACT_PUBONE, ...
+		k, err = reader.ReadUI8()
+		if err != nil {
+			return
+		}
+		msg.Action = Action(k)
 		// reads Communication name
 		msg.Name, err = reader.ReadString()
 		if err != nil {
@@ -176,8 +186,13 @@ func (this *Wire) write(connection net.Conn) {
 	w := bufio.NewWriter(connection)
 	writer := NewCustomWriter(w)
 	for outgoing := range this.emit {
+		// version
+		err := writer.WriteUI8(uint8(outgoing.Version))
+		if fail(this, err, outgoing) {
+			return
+		}
 		// kind
-		err := writer.WriteUI8(uint8(outgoing.Kind))
+		err = writer.WriteUI8(uint8(outgoing.Kind))
 		if fail(this, err, outgoing) {
 			return
 		}
@@ -193,6 +208,11 @@ func (this *Wire) write(connection net.Conn) {
 			return
 		}
 
+		// action
+		err = writer.WriteUI8(uint8(outgoing.Action))
+		if fail(this, err, outgoing) {
+			return
+		}
 		// Communication name size
 		err = writer.WriteString(outgoing.Name)
 		if fail(this, err, outgoing) {
@@ -212,14 +232,18 @@ func (this *Wire) write(connection net.Conn) {
 		if fail(this, err, outgoing) {
 			return
 		}
+		// signals completion
+		if outgoing.callback.completed != nil {
+			outgoing.callback.completed(nil)
+		}
 	}
 }
 
 func fail(wire *Wire, err error, comm *Communication) bool {
 	if err != nil {
 		logger.Errorf("%s", err.Error())
-		if comm.callback != nil && comm.callback.localFailure != nil {
-			comm.callback.localFailure(err)
+		if comm.callback != nil && comm.callback.completed != nil {
+			comm.callback.completed(err)
 		}
 		wire.Stop()
 		return true
@@ -236,8 +260,8 @@ func (this *Wire) handleIOs() {
 			if ok {
 				logger.Debugf("timeout for request id %v", id)
 				delete(this.callbacks, id)
-				if cb.localFailure != nil {
-					cb.localFailure(RequestTimeoutError)
+				if cb.completed != nil {
+					cb.completed(RequestTimeoutError)
 				}
 			}
 
@@ -254,9 +278,19 @@ func (this *Wire) handleIOs() {
 					}
 
 					if msg.Kind == ERROR || msg.Kind == ERROR_PARTIAL {
-						callback.remoteFailure(Payload{msg.Kind, msg.Data})
+						callback.remoteFailure(
+							Payload{
+								msg.Kind,
+								msg.Header,
+								msg.Data,
+							})
 					} else {
-						callback.success(Payload{msg.Kind, msg.Data})
+						callback.success(
+							Payload{
+								msg.Kind,
+								msg.Header,
+								msg.Data,
+							})
 					}
 				}
 
@@ -363,8 +397,9 @@ func (this *Wire) Stop() {
 	this.kill <- true
 }
 
-// sends data to the connection and the response is returned to the passed function
-func (this *Wire) Send(name string, data []byte, success func(Payload), remoteFailure func(Payload), localFailure func(error)) error {
+// sends data to the connection and the response is returned to the passed function.
+// This a method is used for publish/subscribe and also for reply/request
+func (this *Wire) Send(action Action, name string, data []byte, success func(Payload), remoteFailure func(Payload), completed func(error)) error {
 	// check size of data
 	size := len(data)
 	if size > int(UINT16_SIZE) {
@@ -388,7 +423,7 @@ func (this *Wire) Send(name string, data []byte, success func(Payload), remoteFa
 			call = &callback{
 				success:       success,
 				remoteFailure: remoteFailure,
-				localFailure:  localFailure,
+				completed:     completed,
 			}
 			k = REQUEST
 		}
@@ -396,6 +431,7 @@ func (this *Wire) Send(name string, data []byte, success func(Payload), remoteFa
 		comm := &Communication{
 			Kind:      k,
 			Timestamp: time.Now(),
+			Action:    action,
 			Name:      name,
 			Data:      data,
 			callback:  call,
@@ -405,93 +441,4 @@ func (this *Wire) Send(name string, data []byte, success func(Payload), remoteFa
 	}
 
 	return nil
-}
-
-// calls a endpoint at the other end point. If there is no success handler, then a reply is not expected.
-// if the multiple flag is set, then the success handler, if not nil, must have a slice as a parameter
-func (this *Wire) Call(name string, message interface{}, success interface{}, failure func(error), codec Codec, multiReply bool) error {
-	var successHandler func(Payload)
-	var failureHandler func(Payload)
-
-	if success != nil {
-		var returnValue reflect.Value
-		var returnType reflect.Type
-		function := reflect.ValueOf(success)
-		typ := function.Type()
-		size := typ.NumIn()
-		if size > 1 {
-			return errors.New("success function must have at the most one parameter.")
-		} else if size == 1 {
-			returnType = typ.In(0)
-		}
-
-		if multiReply {
-			if size != 1 || returnType.Kind() != reflect.Slice {
-				return errors.New("When a multiple reply, the success function must have one parameter and it must be a slice.")
-			} else {
-				// instanciates the slice
-				returnValue = reflect.New(returnType).Elem()
-				// sets the return type to the inner type of the array
-				returnType = returnType.Elem()
-			}
-		}
-
-		successHandler = func(payload Payload) {
-			var p reflect.Value
-			if returnType != nil {
-				p = reflect.New(returnType)
-				codec.Decode(payload.Data, p.Interface())
-				if multiReply {
-					returnValue = reflect.Append(returnValue, p.Elem())
-				} else {
-					returnValue = p.Elem()
-				}
-			}
-
-			// reply is the final reply
-			if payload.Kind == REPLY {
-				params := make([]reflect.Value, 0)
-				if returnType != nil {
-					params = append(params, returnValue)
-				}
-				function.Call(params)
-			}
-		}
-	}
-
-	if failure != nil {
-		var faults Faults
-		var err error
-		failureHandler = func(payload Payload) {
-			fault := Fault{}
-			codec.Decode(payload.Data, &fault)
-			if multiReply {
-				faults = append(faults, fault)
-				err = faults
-			} else {
-				err = fault
-			}
-			if payload.Kind == ERROR {
-				failure(err)
-			}
-		}
-	}
-
-	var data []byte
-	var err error
-	if message != nil {
-		data, err = codec.Encode(message)
-		if err != nil {
-			return err
-		}
-	}
-	err = this.Send(
-		name,
-		data,
-		successHandler,
-		failureHandler,
-		failure,
-	)
-
-	return err
 }

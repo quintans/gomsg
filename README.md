@@ -1,7 +1,7 @@
 goBus
 =====
 
-Message Bus in Go
+Message BUS in Go
 
 This is an exercise to see what I could do in Go regarding networking and also to learn a bit more about Go.
 
@@ -9,18 +9,17 @@ The BUS is constituded by one central broker (eventualy there will be more than 
 
 Features
 -
-* Publish/Subscribe message queue
-* Request/Reply (single or multiple endpoints)
+* Publish/Subscribe, message Queue
+* Request/Reply (single or multiple reply endpoints)
+* Message Listeners
 
 Dependencies
 -
-Go 1.1
+Go 1.1+
 
 Todo
 -
 * Cluster
 * Message Persistence
-* Administration Clients
-* Message scope
 * Security
 * Tests

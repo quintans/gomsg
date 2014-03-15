@@ -12,6 +12,40 @@ import (
 
 var logger = log.LoggerFor("gobus")
 
+type Action uint8
+
+const (
+	ACT_ASK    Action = iota + 1 // asking if client can accept a request
+	ACT_PUBONE                   // publishing messages to ONE subscriber (queue).
+	ACT_PUBALL                   // publishing messages to ALL subscribers
+	ACT_REG                      // registering an endpoint for subscriptions and requests
+	ACT_REGS                     // registering the client's subscriptions and requests replyers
+	ACT_REQONE                   // requesting for only ONE reply of ONE of the producers
+	ACT_REQALL                   // requesting for ALL the replies of ALL of the producers
+)
+
+func (this Action) String() string {
+	switch this {
+	case ACT_ASK:
+		return "ACT_ASK"
+	case ACT_PUBONE:
+		return "ACT_PUBONE"
+	case ACT_PUBALL:
+		return "ACT_PUBALL"
+	case ACT_REG:
+		return "ACT_REG"
+	case ACT_REGS:
+		return "ACT_REGS"
+	case ACT_REQONE:
+		return "ACT_REQONE"
+	case ACT_REQALL:
+		return "ACT_REQALL"
+	}
+	return ""
+}
+
+type MsgKind uint8
+
 // kind
 const (
 	NONE          MsgKind = iota // just send and do not expect a REPLY
@@ -21,8 +55,6 @@ const (
 	ERROR                        // ERROR for a REQUEST
 	ERROR_PARTIAL                // ERROR for a REQUEST of multiple replies
 )
-
-type MsgKind uint8
 
 func (this MsgKind) String() string {
 	switch this {
@@ -43,15 +75,16 @@ func (this MsgKind) String() string {
 }
 
 type Payload struct {
-	Kind MsgKind
-	Data []byte
+	Kind   MsgKind
+	Header []byte // partialy implemented
+	Data   []byte
 }
 
 type callback struct {
 	timer         *time.Timer
 	success       func(Payload)
 	remoteFailure func(Payload)
-	localFailure  func(error)
+	completed     func(error)
 }
 
 type Response struct {
@@ -64,9 +97,11 @@ type Response struct {
 type Communication struct {
 	Emiter interface{}
 
+	Version   uint8
 	Kind      MsgKind
 	Id        uint32
 	Timestamp time.Time
+	Action    Action
 	Name      string
 	Header    []byte
 	Data      []byte

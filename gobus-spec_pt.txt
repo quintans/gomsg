@@ -4,10 +4,12 @@ As mensagens são entregues debaixo de tópicos (tipo de mensagem). As mensagens d
 
 Mensagem:
 ---------
++Version: version of the data structure
 +Kind: NONE, REQUEST, REPLY, ERROR
 +msgId: message id for this connection
 +msgUTC: UTC
-+topic: Topic Name: /systemA/North
++action: ASK, PUB, QUEUE, ...
++name: Topic Name: /systemA/North
 +headers: map[string]string
 +payload: bytes (encode/decode)
 ?+brokerId:
@@ -22,7 +24,11 @@ x O Cliente indica qual o grupo de mensagens que quer escutar.
 x O servidor regista debaixo do grupo de mensagens, os clientes que respeitam a regra
 x O Cliente envia mensagem (publish)
 x O Servidor lê a mensagem e reenvia a mensagem (broadcast) para todos os clientes interessados, em novas threads.
-x O cliente tenta religar-se sempre que a ligação é interrompida
+x O cliente tenta religar-se sempre que a ligação é interrompida.
+  TODO: a nova ligação deve ser obtida através de um "directorio". (NLB)
+
+#queuing
+x igual a publish-subscribe mas só um consumidor recebe a mensagem (random/shuffle?).
 
 2 fase)
 #Request/Reply (single/multiple)#
@@ -49,68 +55,70 @@ x O requerente acumula as várias respostas numa array, até receber a ultima resp
 x Entrega a array à callback.
 x O requerente remove a callback
 
+TODO: Broker Listeners
+----------------------
+Subscribers especiais que escutam multiplos eventos baseados em wildcards (talvez regular expressions). 
+ex: "/scada/digital/*" -> escuta eventos do tipo "/scada/digital/d1", "/scada/digital/abc", ...
+
 3 fase)
 #Cluster#
-- Um cluster é constituido por vários brokers (nós), tendo à frente um balanceador de carga (NLB)
+- Um cluster é constituido por vários brokers (nós), tendo à frente um balanceador de carga (NLB), ou um HA Proxy.
+- Um cluster tem um identificador unico conhecido por todos os nós. Permite a convivencia de cluster distintos na mesma rede.
+- Todos os nós do cluster são iguais.
+- Sempre que um nó fica online, anuncia-se. O outros nós reagem estabelecendo ligações ao novo nó, que por sua vez estabelece uma ligação inversa.
 - Quando um cliente ligado a um broker subescreve um tópico, esse broker anuncia-se aos outros brokers como subscriber desse tópico.
-- Um broker vê outro broker como sendo um cliente normal.
+- No que respeita à troca de eventos, os nós são vistos como clientes uns dos outros. 
+	As mensagens reenviadas aos brokers têm que levar a indicação que dali, só podem seguir para clientes. Ou seja, entre brokers, só pode haver UM reencaminhamento, eliminando o risco de as mensagens circularem em loop inifinito entre os clusters.
 
 4 fase)
-#PERSISTENCIA DE EVENTOS#
+#PERSISTENCIA DE MENSAGENS
 - Um broker pode ter um mirror (nó que vai ter uma replica dos eventos e o registos dos clientes)
 - Um broker guarda numa lista os eventos entregues (só os marcados para serem persistidos), por um periodo de tempo máximo (ex: 1 dia).
-  Um broker também mantém uma relação dos clientes ligados e o ultimo evento entregue.
-  As relações com os clientes são eliminadas assim que o seu ultimo evento sai da cache por timeout.
-  Os eventos mais antigos que o ultimo evento do cliente mais antigo também são eliminados.
+- Uma lista por cada tópico.
+- Cada evento é registado com um número sequencial unico dentro do tópico. Esse número faz parte do envelope enviado ao consumidor, juntamente com o guid do broker original.
+- O consumidor mantem o registo do guid do brokers e do número sequencial da última mensagem recebida.
 - Quando uma mensagem é entregue com sucesso a um broker - ocorrendo replica do evento para o mirror - este envia um ACK ao cliente indicando que tudo correu bem.
 - Um evento de mirror não provoca broadcast.
 
 NOTA: para registar as mensagens usar buckets de ficheiros em vez de BD, ja que a persistencia é linear. 
-Os ficheiros irão servir somente de backup para os dados em memória.
-Para guardar a referencia dos clientes usa-se um ficheiro de escrita random em que os clientes invalidados são subrescritos pelo cliente na ultima posição. A seguir reduz-se o tamanho do ficheiro eliminando-se a ultima entrada (que já foi copiada no passo anterior).
     
 NOTA: PARA REQUEST/REPLY, NÃO HÁ PERSISTENCIA DAS MENSAGENS. SE UM NÓ DO CAMINHO FALHA, TODO O PROCESSO FALHA (TIMEOUT). É NECESSÁRIO TENTAR OUTRA VEZ.
 	
 Casos de uso:
-» Clinte novo liga-se a um broker:
-	- Um cliente liga-se a um broker, recebe deste um id e fica a ouvir eventos.
+» Um cliente envia mensagem não persistente
+
+» Um cliente envia mensagem persistente
+	- O broker recebe mensagem
+	- persiste mensagem (grava em disco e envia mensagem ao mirror)
+	- o broker entrega a mensagens aos consumidores interessados
+	- se um broker recebe /reencaminha mensagem
+	- Devolve ACK ao produtor da mensagem
+	- Se houver algum erro o cliente volta a enviar a mensagem
+	- mensagens duplicadas são descartadas pelos clientes consumidores?????
+
+» Cliente novo liga-se a um broker:
+	- Um cliente liga-se a um broker.
+	- O broker atribui um numero sequencial ao cliente (clientNo).
+	- O cliente diz quais os tópicos que pretende receber e fica à escuta.
 
 » Um cliente antigo retorna:
-	- O cliente liga-se a um broker novo ou o mesmo. Se o broker não é o mesmo, o broker novo pergunta aos outros brokers para enviarem todos os eventos pendentes para este cliente. Após envio com sucesso o cliente é dereferenciado do broker antigo. Estes eventos não são registados na cache do broker novo. Enquanto esta operação ocorre, os eventos novos para o cliente ficam pendentes.
+	- O cliente liga-se a um broker.
+	- O broker atribui um numero sequencial ao cliente (clientNo).
+	- O cliente envia ao broker a lista de topicos que quer escutar, juntamente com uma lista dos ultimos brokerId/topic/msgNo das mensagens persistentes que recebeu. Este ultimos permitem que o broker saiba como encaminhar os eventos que venham a imediatamente seguir à entrega do último evento pendente. O broker deste cliente (consumer) irá descartar eventos normais persistentes vindos de um broker e tópico sobre o qual está a decorrer um ciclo de consumo de pendentes. Estes eventos não são perdidos pois como estão a ser persistidos, eventualmente serão entregues. Assim que a ultima mensagem pendente é recebida, para um broker/topico, o broker deixa de descartar mensagens.
+	- O broker, usando o guid-msgNo fornecido, começa a questionar os brokers do cluster. Se um broker não for encontrado (offline), todos os brokers são questionados para aquele brokerId.
+	- O broker que recebe o pedido de mensagens persistidas, lança uma goroutine para processar, um/cem a um/cem, os eventos em log a partir do msgNo fornecido.
+	- O envelope da mensagem criada contem a informação do broker guid e do clientNo para o correto encaminhamento. Só o cliente que pediu é que recebe as mensagens.
+	- O último evento da lista a ser enviado é indicado como o ultimo.
+	- A partir daqui os próximos eventos persistentes são tratados normalmente.
+        - Durante este ciclo de pendentes, os eventos não persistentes foram sempre consumidos normalmente.
 
-- Um broker mirror fica online: 
-	- Pede ao seu mirror os eventos (juntamente com os clientes) desde o seu cliente mais antigo e guarda em cache (Nota podemos estar a falar de GBs).
+- Um broker mirror fica online
+	- descarta log anterior de mensagens
+	- gera novo guid
+	- Pede ao mirror o log do mirror (Nota podemos estar a falar de GBs).
 
 - Um broker fica offline imediatamente a seguir a receber uma mensagem e enviar o ACK ao cliente.
-	- O broker mirror, apercebe-se da falha envia ele a mensagem. (também envia uma mensagem de alarme sobre o broker que ficou offline)
-
-- As comunicações entre brokers, relacionadas com operações do cluster, são feitos num porto diferente da comunicação dos eventos.
-- No que respeita à troca de eventos, os nós são vistos como clientes uns dos outros. 
-	As mensagens reenviadas aos brokers têm que levar a indicação que dali, só podem seguir para clientes. Ou seja, entre brokers, só pode haver UM reencaminhamento, eliminando o risco de as mensagens circularem em loop inifinito entre os clusters.
-- Um nó ao ficar online procura contactar todos os nós previamente configurados.
-	* Assim que fica online começa a escutar.
-	* tenta estabelecer contacto com um dos nós previamente configurados.  
-	* se o nó ao qual está a tentar contactar entretanto também estabeleceu uma ligação (os dois ficaram online ao mesmo tempo), tenta-se novamente.
-	DETALHE:
-		O broker A fica à escuta.
-		Locked list {	
-			O broker A antes de estabelecer contacto com o broker B, verifica a sua lista se existe contacto registado do broker B, não avancando se existe.
-			O broker A regista na sua lista de contactos como pendente a sua ligação com o broker B.
-		}
-		Contacto COM o broker B.
-		Locked {
-			Se o broker A recebe OK do broker B esta ligação passa a ser válida.
-			Se o broker A recebe NOK do broker B, A desliga-se de B, remove a entrada nos contactos.
-			Se o broker A recebe RETRY do broker B, A desliga-se de B, remove a entrada nos contactos, espera por um periodo aleatório, e tenta novamente.
-		}
-
-		Contacto DO broker B
-		Locked contact list {
-			Verifica a lista de contactos pelo boker B.
-			Se não o encontra envia OK, e regista B.
-			Se o encontra activo envia NOK, e desliga-se de B
-			Se o encontra pendente envia RETRY, e desliga-se de B
-		}
+	- O broker mirror, apercebe-se da falha e fica ele a responder a pedidos de mansagens pendentes (replay).
 
 ==============================================
 	

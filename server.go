@@ -1,7 +1,9 @@
 package gobus
 
 import (
+	"errors"
 	"net"
+	"strings"
 	"sync"
 
 	//"code.google.com/p/go-uuid/uuid"
@@ -12,13 +14,7 @@ var NoReliableProviderFault = NewFault(ERR_NO_PROVIDER, "No reliable provider av
 
 const (
 	ERR_NO_PROVIDER = "BUS01"
-
-	ASK_CMD    = "ask:"              // prefix for asking if client can accept a request
-	PUB_CMD    = "pub:"              // prefix for publishing messages
-	REG_CMD    = "reg:"              // prefix for registering an endpoint for subscriptions and requests
-	CMD_REGS   = "cmd:registrations" // prefix for registering the client's subscriptions and requests replyers
-	REQONE_CMD = "reqone:"           // prefix for requesting for only one reply of one of the producers
-	REQALL_CMD = "reqall:"           // prefix for requesting for all the replies of all of the producers
+	MANY            = "*"
 )
 
 type Pipe struct {
@@ -48,27 +44,41 @@ func NewServer(codec Codec) *Server {
 
 	this.filter = new(FilterHandler)
 	// register publisher dispacher filter
-	this.filter.Push(CMD_REGS, this.registrations)
-	this.filter.Push(REG_CMD+"*", this.register)
-	this.filter.Push(REQALL_CMD+"*", this.answerAll)
-	this.filter.Push(REQONE_CMD+"*", this.answerOne)
-	this.filter.Push(PUB_CMD+"*", this.broadcast)
+	this.filter.Push("*", this.dispatcher)
 
 	return this
 }
 
-func (this *Server) getConsumers(name string) []*Wire {
+// returns a list with the clients and the listeners that match the exact name
+func (this *Server) getConsumers(name string) ([]*Wire, []*Wire) {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 
-	wires := this.registry[name]
+	/*
+		wires := this.registry[name]
+		consumers := make([]*Wire, 0)
+		if wires != nil {
+			for _, wire := range wires {
+				consumers = append(consumers, wire)
+			}
+		}
+		return consumers
+	*/
+
 	consumers := make([]*Wire, 0)
-	if wires != nil {
-		for _, wire := range wires {
-			consumers = append(consumers, wire)
+	listeners := make([]*Wire, 0)
+	for rule, wires := range this.registry {
+		if rule == name {
+			for _, wire := range wires {
+				consumers = append(consumers, wire)
+			}
+		} else if strings.HasSuffix(rule, MANY) && strings.HasPrefix(name, rule[:len(rule)-1]) {
+			for _, wire := range wires {
+				listeners = append(listeners, wire)
+			}
 		}
 	}
-	return consumers
+	return consumers, listeners
 }
 
 func (this *Server) AddFilter(rule string, filters ...func(ctx IContext) error) {
@@ -116,36 +126,38 @@ func (this *Server) handleConnection(c net.Conn, server IServer) {
 
 func (this *Server) answerAll(ctx IContext) error {
 	comm := ctx.GetRequest()
-	name := comm.Name[len(REQALL_CMD):]
+	name := comm.Name
 	emiter := comm.Emiter.(*Wire)
 	logger.Debugf("Requesting ALL '%s's", name)
-	clients := this.getConsumers(name)
+	clients, listeners := this.getConsumers(name)
 	count := len(clients)
 	answerChan := make(chan []byte)
 	errorChan := make(chan []byte)
 	for _, wire := range clients {
-		// Does not send to the same client
+		// Does not send to the client making the request
 		if wire.Connection != emiter.Connection {
 			// request all endpoints for their data
 			go func(wire *Wire, name string, data []byte) {
 				wire.Send(
+					comm.Action,
 					name,
 					data,
 					func(answer Payload) {
-						logger.Debugf("One of Many replies to %s", name)
+						//logger.Debugf("One of Many replies to %s", name)
 						answerChan <- answer.Data
 					},
 					func(e Payload) {
 						errorChan <- e.Data
 					},
 					func(fault error) {
-						e, err := this.codec.Encode(NewFaultError(fault))
-						if err != nil {
-							logger.Errorf("%s", fault.Error())
+						if fault != nil {
+							e, err := this.codec.Encode(NewFaultError(fault))
+							if err != nil {
+								logger.Errorf("%s", fault.Error())
+							}
+							errorChan <- e
 						}
-						errorChan <- e
 					})
-
 			}(wire, name, comm.Data)
 		}
 	}
@@ -158,7 +170,7 @@ func (this *Server) answerAll(ctx IContext) error {
 			if count == 0 {
 				logger.Debugf("Last reply of Many for %s", name)
 				r.Kind = REPLY // this will close the communication
-				return nil
+				break
 			} else {
 				r.Kind = REPLY_PARTIAL
 				r.Flush()
@@ -169,49 +181,59 @@ func (this *Server) answerAll(ctx IContext) error {
 			count--
 			if count == 0 {
 				r.Kind = ERROR // this will close the communication
-				return nil
+				break
 			} else {
 				r.Kind = ERROR_PARTIAL
 				r.Flush()
 			}
 		}
 	}
+	this.sendToClients(emiter, listeners, comm.Action, comm.Name, comm.Data)
 	return nil
 }
 
 func (this *Server) answerOne(ctx IContext) error {
 	comm := ctx.GetRequest()
-	name := comm.Name[len(REQONE_CMD):]
+	name := comm.Name
 	emiter := comm.Emiter.(*Wire)
 	logger.Debugf("Requesting ONE '%s'", name)
-	clients := this.getConsumers(name)
+	clients, listeners := this.getConsumers(comm.Name)
 	count := len(clients)
 	clientChan := make(chan *Wire)
 	// ask all endpoints if they accept a request
 	for _, wire := range clients {
 		// Does not send to the same client
 		if wire.Connection != emiter.Connection {
-			go func(wire *Wire, name string, data []byte) {
+			go func(wire *Wire, name string) {
 				logger.Debugf("asking %s to reply", wire.Connection.RemoteAddr())
-				wire.Call(
-					ASK_CMD+name,
+				wire.Send(
+					comm.Action,
+					name,
 					nil,
-					func(ok bool) {
+					func(payload Payload) {
+						var ok bool
+						this.codec.Decode(payload.Data, &ok)
 						if ok {
-							logger.Debugf("%s has accepted to reply", wire.Connection.RemoteAddr())
+							//logger.Debugf("%s has accepted to reply", wire.Connection.RemoteAddr())
 							clientChan <- wire
 						} else {
-							logger.Debugf("%s has denied to reply", wire.Connection.RemoteAddr())
+							//logger.Debugf("%s has denied to reply", wire.Connection.RemoteAddr())
 							clientChan <- nil
 						}
 					},
-					func(e error) {
+					func(payload Payload) {
+						fault := Fault{}
+						this.codec.Decode(payload.Data, &fault)
+						logger.Errorf("Error when asking %s to reply: %s", wire.Connection.RemoteAddr(), fault)
 						clientChan <- nil
 					},
-					this.codec,
-					false)
-
-			}(wire, name, comm.Data)
+					func(e error) {
+						if e != nil {
+							logger.Errorf("Error when asking %s to reply: %s", wire.Connection.RemoteAddr(), e)
+							clientChan <- nil
+						}
+					})
+			}(wire, name)
 		}
 	}
 
@@ -227,7 +249,7 @@ func (this *Server) answerOne(ctx IContext) error {
 			if count > 0 {
 				logger.Debugf("collecting the remaining %v client(s)", count)
 				go func(cc chan *Wire, cnt int) {
-					for other := range clientChan {
+					for other := range cc {
 						others = append(others, other)
 						cnt--
 						if count == 0 {
@@ -258,6 +280,7 @@ func (this *Server) answerOne(ctx IContext) error {
 				if <-failed {
 					continue
 				} else {
+					this.sendToClients(emiter, listeners, comm.Action, comm.Name, comm.Data)
 					return nil
 				}
 			}
@@ -286,6 +309,7 @@ func (this *Server) callEllected(wire *Wire, name string, data []byte, failed ch
 	logger.Debugf("requesting %s", wire.Connection.RemoteAddr())
 	go func(wire *Wire, name string, data []byte) {
 		wire.Send(
+			ACT_REQONE,
 			name,
 			data,
 			func(answer Payload) {
@@ -299,38 +323,105 @@ func (this *Server) callEllected(wire *Wire, name string, data []byte, failed ch
 				failed <- true
 			},
 			func(fault error) {
-				logger.Debugf("%s answered with failure: %s", wire.Connection.RemoteAddr(), fault.Error())
-				failed <- true
+				if fault != nil {
+					logger.Debugf("%s answered with failure: %s", wire.Connection.RemoteAddr(), fault.Error())
+					failed <- true
+				}
 			})
 
 	}(wire, name, data)
+}
+
+func (this *Server) dispatcher(ctx IContext) error {
+	action := ctx.GetRequest().Action
+	switch action {
+	case ACT_REGS:
+		return this.registrations(ctx)
+	case ACT_REG:
+		return this.register(ctx)
+	case ACT_REQALL:
+		return this.answerAll(ctx)
+	case ACT_REQONE:
+		return this.answerOne(ctx)
+	case ACT_PUBALL:
+		return this.broadcast(ctx)
+	case ACT_PUBONE:
+		return this.queue(ctx)
+	default:
+		return nil
+	}
 }
 
 // Broadcast to all clients under this topic.
 // This is executed by the client goroutine
 func (this *Server) broadcast(ctx IContext) error {
 	comm := ctx.GetRequest()
-	name := comm.Name[len(PUB_CMD):]
+	if strings.HasSuffix(comm.Name, MANY) {
+		return errors.New("Cannot broadcast to topics ending with " + MANY + ": " + comm.Name)
+	}
 	emiter := comm.Emiter.(*Wire)
-	logger.Debugf("Broadcasting topic %s from %s", name, emiter.Connection.RemoteAddr())
-	clients := this.getConsumers(name)
+	logger.Debugf("Broadcasting topic %s from %s", comm.Name, emiter.Connection.RemoteAddr())
+	clients, listeners := this.getConsumers(comm.Name)
+	this.sendToClients(emiter, clients, comm.Action, comm.Name, comm.Data)
+	this.sendToClients(emiter, listeners, comm.Action, comm.Name, comm.Data)
+	return nil
+}
+
+func (this *Server) sendToClients(emiter *Wire, clients []*Wire, action Action, name string, data []byte) {
 	for _, wire := range clients {
-		// Does not send to the same client
+		// Does not send to the client making the request
 		if wire.Connection != emiter.Connection {
-			//logger.Debugf("Broadcasting topic %s to %s", name, wire.Connection.RemoteAddr())
-			go func(wire *Wire, name string, data []byte) {
-				wire.Send(name, data, nil, nil, func(fault error) {
-					logger.Errorf("%s", fault.Error())
+			//logger.Debugf("Broadcasting topic %s to %s", comm.Name, wire.Connection.RemoteAddr())
+			go func(wire *Wire, action Action, name string, data []byte) {
+				wire.Send(action, name, data, nil, nil, func(fault error) {
+					if fault != nil {
+						logger.Errorf("%s", fault.Error())
+					}
 				})
-			}(wire, name, comm.Data)
+			}(wire, action, name, data)
 		}
 	}
+}
+
+// Broadcast to ONE client under this topic.
+// This is executed by the client goroutine
+func (this *Server) queue(ctx IContext) error {
+	comm := ctx.GetRequest()
+	if strings.HasSuffix(comm.Name, MANY) {
+		return errors.New("Cannot queue to topics ending with " + MANY + ": " + comm.Name)
+	}
+	emiter := comm.Emiter.(*Wire)
+	logger.Debugf("Queueing topic %s from %s", comm.Name, emiter.Connection.RemoteAddr())
+	clients, listeners := this.getConsumers(comm.Name)
+	ok := make(chan bool)
+	// returns after the first successful send
+	for _, wire := range clients {
+		// Does not send to the client making the request
+		if wire.Connection != emiter.Connection {
+			//logger.Debugf("Queueing topic %s to %s", comm.Name, wire.Connection.RemoteAddr())
+			go func(wire *Wire, name string, data []byte) {
+				wire.Send(comm.Action, name, data, nil, nil, func(fault error) {
+					if fault != nil {
+						logger.Errorf("%s", fault.Error())
+						ok <- false
+					} else {
+						ok <- true
+					}
+				})
+			}(wire, comm.Name, comm.Data)
+			// waits for ok
+			if <-ok {
+				break
+			}
+		}
+	}
+	this.sendToClients(emiter, listeners, comm.Action, comm.Name, comm.Data)
 	return nil
 }
 
 func (this *Server) register(ctx IContext) error {
 	comm := ctx.GetRequest()
-	name := comm.Name[len(REG_CMD):]
+	name := comm.Name
 	emiter := comm.Emiter.(*Wire)
 	logger.Debugf("Subscribing %s to '%s'", emiter.Connection.RemoteAddr(), name)
 

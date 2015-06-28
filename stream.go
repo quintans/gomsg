@@ -1,98 +1,84 @@
-package gobus
+package gomsg
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"io"
 )
 
-type CustomReader struct {
-	Reader io.Reader
-	buf8   []byte
-	buf16  []byte
-	buf32  []byte
-	buf64  []byte
+type InputStream struct {
+	reader io.Reader
 }
 
-func NewCustomReader(reader io.Reader) *CustomReader {
-	this := &CustomReader{Reader: reader}
+func NewInputStream(reader io.Reader) *InputStream {
+	this := &InputStream{reader}
 	return this
 }
 
-func (this *CustomReader) ReadUI8() (uint8, error) {
-	if this.buf8 == nil {
-		this.buf8 = make([]byte, 1)
+func (this *InputStream) readBytes(size int) ([]byte, error) {
+	var data = make([]byte, 8)
+	if _, err := io.ReadFull(this.reader, data); err != nil {
+		return nil, err
 	}
-	_, err := this.Reader.Read(this.buf8)
-	if err != nil {
-		return 0, err
-	} else {
-		return this.buf8[0], err
-	}
-}
-
-func (this *CustomReader) ReadUI16() (uint16, error) {
-	if this.buf16 == nil {
-		this.buf16 = make([]byte, 2)
-	}
-	_, err := io.ReadFull(this.Reader, this.buf16)
-	if err != nil {
-		return 0, err
-	}
-	data := binary.LittleEndian.Uint16(this.buf16)
 	return data, nil
 }
 
-func (this *CustomReader) ReadUI32() (uint32, error) {
-	if this.buf32 == nil {
-		this.buf32 = make([]byte, 4)
-	}
-	_, err := io.ReadFull(this.Reader, this.buf32)
+func (this *InputStream) ReadUI8() (uint8, error) {
+	buf, err := this.readBytes(1)
 	if err != nil {
 		return 0, err
 	}
-	data := binary.LittleEndian.Uint32(this.buf32)
-	return data, nil
+	return buf[0], err
 }
 
-func (this *CustomReader) ReadUI64() (uint64, error) {
-	if this.buf64 == nil {
-		this.buf64 = make([]byte, 8)
-	}
-	_, err := io.ReadFull(this.Reader, this.buf64)
+func (this *InputStream) ReadUI16() (uint16, error) {
+	buf, err := this.readBytes(2)
 	if err != nil {
 		return 0, err
 	}
-	data := binary.LittleEndian.Uint64(this.buf64)
-	return data, nil
+	return binary.LittleEndian.Uint16(buf), nil
 }
 
-func (this *CustomReader) ReadString() (string, error) {
-	// reads message name size
-	size, err := this.ReadUI16()
+func (this *InputStream) ReadUI32() (uint32, error) {
+	buf, err := this.readBytes(4)
+	if err != nil {
+		return 0, err
+	}
+	return binary.LittleEndian.Uint32(buf), nil
+}
+
+func (this *InputStream) ReadUI64() (uint64, error) {
+	buf, err := this.readBytes(8)
+	if err != nil {
+		return 0, err
+	}
+	return binary.LittleEndian.Uint64(buf), nil
+}
+
+func (this *InputStream) ReadString() (string, error) {
+	return bufio.NewReader(this.reader).ReadString(0)
+}
+
+/*
+func (this *InputStream) ReadString() (string, error) {
+	data, err := this.ReadBytes()
 	if err != nil {
 		return "", err
 	}
-	if size > 0 {
-		in := bytes.NewBuffer(make([]byte, 0))
-		_, err = io.CopyN(in, this.Reader, int64(size))
-		if err != nil {
-			return "", err
-		}
-		return string(in.Bytes()), nil
-	}
-	return "", nil
+	return string(data), nil
 }
+*/
 
-func (this *CustomReader) ReadBytes() ([]byte, error) {
-	// reads message name size
-	size, err := this.ReadUI32()
+func (this *InputStream) ReadBytes() ([]byte, error) {
+	// reads byte array size
+	size, err := this.ReadUI16()
 	if err != nil {
 		return nil, err
 	}
 	if size > 0 {
 		in := bytes.NewBuffer(make([]byte, 0))
-		_, err = io.CopyN(in, this.Reader, int64(size))
+		_, err = io.CopyN(in, this.reader, int64(size))
 		if err != nil {
 			return nil, err
 		}
@@ -103,57 +89,60 @@ func (this *CustomReader) ReadBytes() ([]byte, error) {
 
 // =============
 
-type CustomWriter struct {
-	Writer io.Writer
-	buf8   []byte
-	buf16  []byte
-	buf32  []byte
-	buf64  []byte
+type OutputStream struct {
+	writer io.Writer
 }
 
-func NewCustomWriter(writer io.Writer) *CustomWriter {
-	this := &CustomWriter{Writer: writer}
+func NewOutputStream(writer io.Writer) *OutputStream {
+	this := &OutputStream{writer}
 	return this
 }
 
-func (this *CustomWriter) WriteUI8(data uint8) error {
-	if this.buf8 == nil {
-		this.buf8 = make([]byte, 1)
-	}
-	this.buf8[0] = data
-	_, err := this.Writer.Write(this.buf8)
+func (this *OutputStream) WriteUI8(data uint8) error {
+	var buf8 = make([]byte, 1)
+	buf8[0] = data
+	_, err := this.writer.Write(buf8)
 	return err
 }
 
-func (this *CustomWriter) WriteUI16(data uint16) error {
-	if this.buf16 == nil {
-		this.buf16 = make([]byte, 2)
-	}
-	binary.LittleEndian.PutUint16(this.buf16, data)
-	_, err := this.Writer.Write(this.buf16)
+func (this *OutputStream) WriteUI16(data uint16) error {
+	var buf16 = make([]byte, 2)
+	binary.LittleEndian.PutUint16(buf16, data)
+	_, err := this.writer.Write(buf16)
 	return err
 }
 
-func (this *CustomWriter) WriteUI32(data uint32) error {
-	if this.buf32 == nil {
-		this.buf32 = make([]byte, 4)
-	}
-	binary.LittleEndian.PutUint32(this.buf32, data)
-	_, err := this.Writer.Write(this.buf32)
+func (this *OutputStream) WriteUI32(data uint32) error {
+	var buf32 = make([]byte, 4)
+	binary.LittleEndian.PutUint32(buf32, data)
+	_, err := this.writer.Write(buf32)
 	return err
 }
 
-func (this *CustomWriter) WriteUI64(data uint64) error {
-	if this.buf64 == nil {
-		this.buf64 = make([]byte, 8)
-	}
-	binary.LittleEndian.PutUint64(this.buf64, data)
-	_, err := this.Writer.Write(this.buf64)
+func (this *OutputStream) WriteUI64(data uint64) error {
+	var buf64 = make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf64, data)
+	_, err := this.writer.Write(buf64)
 	return err
 }
 
-func (this *CustomWriter) WriteString(data string) error {
-	// string size
+func (this *OutputStream) WriteString(s string) error {
+	data := append([]byte(s), 0)
+	_, err := this.writer.Write([]byte(data))
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+/*
+func (this *OutputStream) WriteString(data string) error {
+	return this.WriteBytes([]byte(data))
+}
+*/
+
+func (this *OutputStream) WriteBytes(data []byte) error {
+	// array size
 	size := uint16(len(data))
 	err := this.WriteUI16(size)
 	if err != nil {
@@ -161,24 +150,7 @@ func (this *CustomWriter) WriteString(data string) error {
 	}
 	// string data
 	if size > 0 {
-		_, err = this.Writer.Write([]byte(data))
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (this *CustomWriter) WriteBytes(data []byte) error {
-	// string size
-	size := uint32(len(data))
-	err := this.WriteUI32(size)
-	if err != nil {
-		return err
-	}
-	// string data
-	if size > 0 {
-		_, err = this.Writer.Write([]byte(data))
+		_, err = this.writer.Write(data)
 		if err != nil {
 			return err
 		}

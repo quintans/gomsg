@@ -1,11 +1,12 @@
 package gomsg
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/binary"
 	"io"
 )
+
+const STRING_END byte = 0
 
 type InputStream struct {
 	reader io.Reader
@@ -17,7 +18,7 @@ func NewInputStream(reader io.Reader) *InputStream {
 }
 
 func (this *InputStream) readBytes(size int) ([]byte, error) {
-	var data = make([]byte, 8)
+	var data = make([]byte, size)
 	if _, err := io.ReadFull(this.reader, data); err != nil {
 		return nil, err
 	}
@@ -57,18 +58,20 @@ func (this *InputStream) ReadUI64() (uint64, error) {
 }
 
 func (this *InputStream) ReadString() (string, error) {
-	return bufio.NewReader(this.reader).ReadString(0)
-}
-
-/*
-func (this *InputStream) ReadString() (string, error) {
-	data, err := this.ReadBytes()
-	if err != nil {
-		return "", err
+	data := []byte{0}
+	var s bytes.Buffer
+	for {
+		if _, err := io.ReadFull(this.reader, data); err != nil {
+			return "", err
+		}
+		if data[0] == STRING_END {
+			break
+		} else {
+			s.WriteByte(data[0])
+		}
 	}
-	return string(data), nil
+	return string(s.Bytes()), nil
 }
-*/
 
 func (this *InputStream) ReadBytes() ([]byte, error) {
 	// reads byte array size
@@ -76,13 +79,9 @@ func (this *InputStream) ReadBytes() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if size > 0 {
-		in := bytes.NewBuffer(make([]byte, 0))
-		_, err = io.CopyN(in, this.reader, int64(size))
-		if err != nil {
-			return nil, err
-		}
-		return in.Bytes(), nil
+		return this.readBytes(int(size))
 	}
 	return nil, nil
 }
@@ -127,19 +126,13 @@ func (this *OutputStream) WriteUI64(data uint64) error {
 }
 
 func (this *OutputStream) WriteString(s string) error {
-	data := append([]byte(s), 0)
+	data := append([]byte(s), STRING_END)
 	_, err := this.writer.Write([]byte(data))
 	if err != nil {
 		return err
 	}
 	return nil
 }
-
-/*
-func (this *OutputStream) WriteString(data string) error {
-	return this.WriteBytes([]byte(data))
-}
-*/
 
 func (this *OutputStream) WriteBytes(data []byte) error {
 	// array size

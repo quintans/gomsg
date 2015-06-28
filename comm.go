@@ -32,6 +32,7 @@ package gomsg
 // When receiving the message, if the function handler, has a parameter different than IRequest/IResponse it will deserialize the payload using the defined decoder.
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
@@ -562,7 +563,8 @@ func (this *Wire) write(c net.Conn, msg Envelope) (err error) {
 		}
 	}()
 
-	w := NewOutputStream(SafeConn{c, msg.timeout})
+	buf := bufio.NewWriter(SafeConn{c, msg.timeout})
+	w := NewOutputStream(buf)
 
 	// kind
 	err = w.WriteUI8(uint8(msg.kind))
@@ -590,12 +592,13 @@ func (this *Wire) write(c net.Conn, msg Envelope) (err error) {
 		}
 	}
 
-	return
+	return buf.Flush()
 }
 
 func read(r *InputStream, bname bool, bpayload bool) (name string, payload []byte, err error) {
 	if bname {
 		name, err = r.ReadString()
+		fmt.Println("===>name:", name)
 		if err != nil {
 			return
 		}
@@ -632,6 +635,7 @@ func (this *Wire) reader(c net.Conn) {
 		var name string
 		var data []byte
 
+		fmt.Println("===>kind:", kind)
 		if test(kind, SUB, UNSUB, REQ, REQALL, PUSH, PUB) {
 			if kind == SUB || kind == UNSUB {
 				// un/register topic from peer
@@ -1083,12 +1087,13 @@ func serializeHanshake(c net.Conn, codec Codec, timeout time.Duration, topics []
 		data = buf.Bytes()
 	}
 
-	w := NewOutputStream(SafeConn{c, timeout})
+	buf := bufio.NewWriter(SafeConn{c, timeout})
+	w := NewOutputStream(buf)
 	err = w.WriteBytes(data)
 	if err != nil {
 		return err
 	}
-	return nil
+	return buf.Flush()
 }
 
 func deserializeHandshake(c net.Conn, codec Codec, timeout time.Duration) (map[string]bool, error) {
@@ -1163,9 +1168,9 @@ func (this *Client) dial(retry time.Duration) {
 	// gets the connection
 	c, err := net.DialTimeout("tcp", this.addr, time.Second)
 	if err != nil {
-		fmt.Println("> failed to connect to", this.addr)
+		fmt.Println("> I: failed to connect to", this.addr)
 		if retry > 0 {
-			fmt.Println("> retry in", retry)
+			fmt.Println("> I: retry in", retry)
 			go func() {
 				time.Sleep(retry)
 				if this.reconnectMaxInterval > 0 && retry < this.reconnectMaxInterval {
@@ -1177,9 +1182,11 @@ func (this *Client) dial(retry time.Duration) {
 		return
 	}
 
+	fmt.Println("> I: connected to", this.addr, "with", c.LocalAddr())
 	// topic exchange
 	err = this.handshake(c)
 	if err != nil {
+		fmt.Println("> E: error:", err)
 		c.Close()
 	} else {
 		go this.wire.writer(c)
@@ -1426,8 +1433,10 @@ func (this *Server) Listen(service string) error {
 			c, err := l.Accept()
 			if err != nil {
 				// happens when the listener is closed
+				fmt.Println("< I: accepting no more due to error:", err)
 				return
 			}
+			fmt.Printf("< I: accepted connection from %s\n", c.RemoteAddr())
 
 			wire := NewWire(this.codec)
 			wire.findHandler = this.findHandler

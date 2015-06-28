@@ -18,28 +18,31 @@ func main() {
 	})
 	cli.Connect("localhost:7777")
 
-	cli2 := gomsg.NewClient()
-	cli2.Handle("REVERSE", func(ctx *gomsg.Request, m string) (string, error) {
-		fmt.Println("<=== processing (2):", m, "from", ctx.Connection().RemoteAddr())
-		return fmt.Sprintf("[2]=%s", reverse(m)), nil
-	})
-	cli2.Connect("localhost:7777")
+	/*
+		cli2 := gomsg.NewClient()
+		cli2.Handle("REVERSE", func(ctx *gomsg.Request, m string) (string, error) {
+			fmt.Println("<=== processing (2):", m, "from", ctx.Connection().RemoteAddr())
+			return fmt.Sprintf("[2]=%s", reverse(m)), nil
+		})
+		cli2.Connect("localhost:7777")
 
-	// just to get in the way
-	cli3 := gomsg.NewClient()
-	cli3.Connect("localhost:7777")
+		// just to get in the way
+		cli3 := gomsg.NewClient()
+		cli3.Connect("localhost:7777")
+	*/
 
 	// ===============
 
 	//time.Sleep(time.Millisecond * 100)
+	fmt.Println("====> requesting...")
+	<-server.Request("REVERSE", "hello", func(ctx gomsg.Response, r string) {
+		fmt.Println("===> reply:", r)
+	})
 	/*
-		<-server.Request("REVERSE", "hello", func(ctx gomsg.IResponse, r string) {
-			fmt.Println("===> reply:", r, ctx.Kind(), "from", ctx.Connection().RemoteAddr())
-		})
+		server.RequestAll("REVERSE", "hello", func(ctx gomsg.Response, r string) {
+			fmt.Println("===> reply:", ctx.Kind, r)
+		}, time.Second)
 	*/
-	server.RequestAll("REVERSE", "hello", func(ctx *gomsg.Response, r string) {
-		fmt.Println("===> reply:", ctx.Kind, r)
-	}, time.Second)
 
 	time.Sleep(time.Millisecond * 100)
 	fmt.Println("I: close...")

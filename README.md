@@ -9,7 +9,7 @@ This is an exercise to see what I could do in Go regarding networking and also t
 
 The idea is that one client endpoint connects to a server endpoint, and as soon the connection is established you can send and receive messages in either endpoint. Also a server can act as a router/broker for messages between clients.
 
-This is loosely inspired in [zeromq](http://zeromq.org/)
+This is loosely inspired by [zeromq](http://zeromq.org/)
 
 Features
 -
@@ -19,10 +19,13 @@ Features
 * RequestAll/Reply (multiple endpoints replying)
 * Message Filters
 
-The following example shows two clients connecting to a server, and the server publishing a message.
+The following example show a simple message bus.
+Three clients connect to a server, and one of them publishs a message that will be received by the other two.
 
 ```go
 server := gomsg.NewServer()
+ // route all messages between the clients
+server.Route("*", time.Second, nil)
 server.Listen(":7777")
 
 cli1 := gomsg.NewClient()
@@ -37,7 +40,10 @@ cli2.Handle("HELLO", func(m string) {
 })
 cli2.Connect("localhost:7777")
 
-server.Publish("HELLO", "World")
+cli := gomsg.NewClient()
+cli.Connect("localhost:7777")
+
+cli.Publish("HELLO", "World")
 
 // give time for things to happen
 time.Sleep(time.Millisecond * 100)

@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	// routing between client 1 and client 2
+	// all messages arriving to the server are routed to the clients
 	server := gomsg.NewServer()
 	server.Listen(":7777")
 	server.Route("*", time.Second, nil)

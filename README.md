@@ -64,6 +64,7 @@ tho decide if they want to behave like Publish/Subscribe (ungrouped) or like Pus
 	server.Listen(":7777")
 	server.Route("*", time.Second, nil)
 
+	// Group HA subscriber
 	cli := gomsg.NewClient()
 	cli.Handle("HELLO", func(m string) {
 		fmt.Println("<=== [1] processing:", m)
@@ -71,6 +72,7 @@ tho decide if they want to behave like Publish/Subscribe (ungrouped) or like Pus
 	cli.SetGroupId("HA")
 	cli.Connect("localhost:7777")
 
+	// Group HA subscriber
 	cli2 := gomsg.NewClient()
 	cli2.Handle("HELLO", func(m string) {
 		fmt.Println("<=== [2] processing:", m)
@@ -78,7 +80,7 @@ tho decide if they want to behave like Publish/Subscribe (ungrouped) or like Pus
 	cli2.SetGroupId("HA")
 	cli2.Connect("localhost:7777")
 
-	// just to get in the way
+	// publisher
 	cli3 := gomsg.NewClient()
 	cli3.Connect("localhost:7777")
 

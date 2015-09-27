@@ -29,13 +29,8 @@ func main() {
 	})
 	// sends multi reply
 	cli.Handle("PIPE", func(ctx *gomsg.Request) {
-		fmt.Println("<=== piping")
-		ctx.SendReply([]byte(fmt.Sprint("Pipe #1")))
-		ctx.SendReply([]byte(fmt.Sprint("Pipe #2")))
-		/*
-			ctx.SendReply([]byte(fmt.Sprint("Pipe #3")))
-			ctx.SendReply([]byte(fmt.Sprint("Pipe #4")))
-		*/
+		ctx.SendReply([]byte("\"Pipe #1\""))
+		ctx.SendReply([]byte("\"Pipe #2\""))
 		ctx.Terminate()
 	})
 	cli.Connect("localhost:7777")
@@ -49,14 +44,21 @@ func main() {
 		fmt.Println("<=== [2] processing:", m, "from", ctx.Connection().RemoteAddr())
 		return fmt.Sprintf("[2] Hello %s", m), nil
 	})
+	cli2.Handle("PIPE", func(ctx *gomsg.Request) string {
+		return "Pipe #201"
+	})
 	cli2.Connect("localhost:7777")
 
 	<-cli3.RequestAll("HELLO", "World!", func(ctx gomsg.Response, r string, e error) {
-		fmt.Println("=================> reply:", r, e, "from", ctx.Connection().RemoteAddr())
+		fmt.Println("===HELLO===> reply:", r, e, "from", ctx.Connection().RemoteAddr())
 	})
-
+	fmt.Println("===============")
+	<-cli3.RequestAll("PIPE", nil, func(ctx gomsg.Response, s string) {
+		fmt.Println("===PIPE===> reply:", ctx.Kind, string(ctx.Reply()), s)
+	})
+	fmt.Println("===============")
 	<-cli3.Request("PIPE", nil, func(ctx gomsg.Response, s string) {
-		fmt.Println("=================> reply:", ctx.Kind, string(ctx.Reply()), s)
+		fmt.Println("===PIPE===> reply:", ctx.Kind, string(ctx.Reply()), s)
 	})
 	/*
 		cli.Request("HELLO", "World!", func(ctx gomsg.IResponse, r string, e error) {

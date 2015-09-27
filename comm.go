@@ -101,9 +101,10 @@ var (
 var (
 	DROPPED      = errors.New("Message was Droped. Wire is closed or full.")
 	NOCODEC      = errors.New("No codec define")
-	UNKNOWNTOPIC = errors.New("Unknown topic")
+	UNKNOWNTOPIC = errors.New("No registered subscriber")
 	TIMEOUT      = errors.New("Timeout while waiting for reply")
 	EOR          = errors.New("End Of Multiple Reply")
+	NACKERROR    = errors.New("Not Acknowledge Error")
 )
 
 type SafeConn struct {
@@ -373,7 +374,7 @@ type Wire struct {
 	mucb      sync.RWMutex
 	callbacks map[uint32]chan Response
 
-	disconnect  func()
+	disconnect  func(error)
 	findHandler func(name string) func(ctx *Request)
 
 	mutop        sync.RWMutex
@@ -395,8 +396,13 @@ func NewWire(codec Codec) *Wire {
 }
 
 func (this *Wire) Destroy() {
-	close(this.chin)
-	close(this.handlerch)
+	if this.chin != nil {
+		close(this.chin)
+		close(this.handlerch)
+
+		this.chin = nil
+		this.handlerch = nil
+	}
 }
 
 func (this *Wire) addRemoteTopic(name string) {
@@ -458,6 +464,11 @@ func (this *Wire) asynchWaitForCallback(msg Envelope) {
 						break
 					}
 				} else {
+					if ctx.Kind == ACK {
+						msg.errch <- nil
+					} else if ctx.Kind == NACK {
+						msg.errch <- NACKERROR
+					}
 					break
 				}
 			}
@@ -556,13 +567,13 @@ func (this *Wire) writer(c net.Conn) {
 		}
 	}
 	// exit
-	this.disconnect()
+	this.disconnect(nil)
 }
 
 func (this *Wire) write(c net.Conn, msg Envelope) (err error) {
 	defer func() {
 		if err != nil {
-			this.disconnect()
+			this.disconnect(err)
 		}
 	}()
 
@@ -695,7 +706,6 @@ func (this *Wire) reader(c net.Conn) {
 					data = []byte(s)
 				}
 				last = kind == ERR
-
 			}
 
 			cb := this.getCallback(seq, last)
@@ -706,13 +716,15 @@ func (this *Wire) reader(c net.Conn) {
 			}
 		}
 	}
-	if err == io.EOF {
-		fmt.Println("< client", c.RemoteAddr(), "closed connection")
-	} else if err != nil {
-		fmt.Println("< error:", err)
-	}
+	/*
+		if err == io.EOF {
+			fmt.Println("< client", c.RemoteAddr(), "closed connection")
+		} else if err != nil {
+			fmt.Println("< error:", err)
+		}
+	*/
 
-	this.disconnect()
+	this.disconnect(err)
 }
 
 // Executes the function that handles the request. By default the reply of this handler is allways final (REQ or ERR).
@@ -1029,7 +1041,10 @@ func NewClient() *Client {
 		return findHandler(name, this.handlers)
 	}
 
-	this.wire.disconnect = this.Disconnect
+	this.wire.disconnect = func(e error) {
+		//this.Disconnect()
+		this.disconnect()
+	}
 	return this
 }
 
@@ -1049,6 +1064,8 @@ func (this *Client) SetCodec(codec Codec) *Client {
 	return this
 }
 
+// Make it belong to a group.
+// Only one element at a time (round-robin) handles the messages.
 func (this *Client) SetGroupId(groupId string) *Client {
 	this.wire.groupId = groupId
 	return this
@@ -1346,15 +1363,23 @@ type Wired struct {
 	wire *Wire
 }
 
+// Connections are grouped accordingly to its group id.
+// A wire with an empty group id means all nodes are different.
+//
+// Wires with the same non empty id are treated as mirrors of each other.
+// This means that we only need to call one of them.
+// The other nodes function as High Availability and load balancing nodes
 type Wires struct {
 	mu     sync.RWMutex
 	wires  []*Wired
+	groups map[string][]*Wired
 	cursor int
 }
 
 func NewWires() *Wires {
 	return &Wires{
-		wires: make([]*Wired, 0),
+		wires:  make([]*Wired, 0),
+		groups: make(map[string][]*Wired),
 	}
 }
 
@@ -1368,6 +1393,7 @@ func (this *Wires) Destroy() {
 		v.conn = nil
 	}
 	this.wires = make([]*Wired, 0)
+	this.groups = make(map[string][]*Wired)
 }
 
 func (this *Wires) Put(conn net.Conn, wire *Wire) {
@@ -1380,61 +1406,71 @@ func (this *Wires) Put(conn net.Conn, wire *Wire) {
 			return
 		}
 	}
-	this.wires = append(this.wires, &Wired{conn, wire})
+	wired := &Wired{conn, wire}
+	this.wires = append(this.wires, wired)
+	group := this.groups[wire.groupId]
+	if group == nil {
+		group = make([]*Wired, 0)
+	}
+	this.groups[wire.groupId] = append(group, wired)
 }
 
 func (this *Wires) Remove(conn net.Conn) {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 
-	for k, v := range this.wires {
-		if v.conn == conn {
-			v.wire.Destroy()
-			v.conn.Close()
-			v.conn = nil
+	var w *Wired
+	this.wires, w = remove(conn, this.wires)
+	if w != nil {
+		group := this.groups[w.wire.groupId]
+		if group != nil {
+			this.groups[w.wire.groupId], _ = remove(conn, group)
+		}
+		w.wire.Destroy()
+		w.conn.Close()
+		w.conn = nil
+	}
 
-			this.wires = append(this.wires[:k], this.wires[k+1:]...)
-			return
+}
+
+func remove(conn net.Conn, wires []*Wired) ([]*Wired, *Wired) {
+	for k, v := range wires {
+		if v.conn == conn {
+			return append(wires[:k], wires[k+1:]...), v
 		}
 	}
+	return wires, nil
 }
 
-func (this *Wires) Do(fn func(w *Wired) bool) {
+func (this *Wires) Get() ([]*Wired, int) {
+	return this.list(false)
+}
+
+func (this *Wires) Rotate() ([]*Wired, int) {
+	return this.list(true)
+}
+
+func (this *Wires) list(rotate bool) ([]*Wired, int) {
+	this.mu.RLock()
+	w := make([]*Wired, len(this.wires))
+	copy(w, this.wires)
+	this.mu.RUnlock()
+
 	this.mu.Lock()
-	defer this.mu.Unlock()
-	this.list(false, fn)
-}
-
-func (this *Wires) Rotate(fn func(w *Wired) bool) {
-	this.mu.Lock()
-	defer this.mu.Unlock()
-	this.list(true, fn)
-}
-
-func (this *Wires) list(rotate bool, fn func(w *Wired) bool) {
 	size := len(this.wires)
 	if this.cursor >= size {
 		this.cursor = 0
 	}
 
-	var skip bool
-	// head
-	for i := this.cursor; i < size; i++ {
-		if !fn(this.wires[i]) {
-			skip = true
-			break
-		}
-	}
-	// tail
-	if !skip {
-		for i := 0; i < this.cursor; i++ {
-			if !fn(this.wires[i]) {
-				break
-			}
-		}
-	}
+	c := this.cursor
 
-	this.cursor++
+	if rotate {
+		this.cursor++
+	}
+	this.mu.Unlock()
+
+	return w, c
+
 	/*
 		r := make([]*Wired, size)
 		for i, v := range this.wires {
@@ -1446,6 +1482,28 @@ func (this *Wires) list(rotate bool, fn func(w *Wired) bool) {
 		}
 		return r
 	*/
+}
+
+func (this *Wires) RotateGroups() (map[string][]*Wired, int) {
+	this.mu.RLock()
+	newMap := make(map[string][]*Wired)
+	for k, v := range this.groups {
+		w := make([]*Wired, len(v))
+		copy(w, v)
+		newMap[k] = w
+	}
+	this.mu.RUnlock()
+
+	this.mu.Lock()
+	if this.cursor >= len(this.wires) {
+		this.cursor = 0
+	}
+
+	c := this.cursor
+	this.cursor++
+	this.mu.Unlock()
+
+	return newMap, c
 }
 
 type Server struct {
@@ -1483,35 +1541,45 @@ func (this *Server) Listen(service string) error {
 			c, err := l.Accept()
 			if err != nil {
 				// happens when the listener is closed
-				fmt.Println("< I: accepting no more due to error:", err)
+				//fmt.Println("< I: accepting no more due to error:", err)
+				fmt.Println("< I: Stoped listening at", l.Addr())
 				return
 			}
 			fmt.Printf("< I: accepted connection from %s\n", c.RemoteAddr())
 
 			wire := NewWire(this.codec)
 			wire.findHandler = this.findHandler
-			this.wires.Put(c, wire)
-
-			wire.disconnect = func() {
-				this.muconn.Lock()
-				defer this.muconn.Unlock()
-
-				if c != nil {
-					this.wires.Remove(c)
-					if this.OnClose != nil {
-						this.OnClose(c)
-					}
-					c = nil
-				}
-			}
 
 			// topic exchange
 			group, remoteTopics, err := this.handshake(c, this.codec)
+
 			if err != nil {
 				c.Close()
 			} else {
 				wire.groupId = group
 				wire.remoteTopics = remoteTopics
+				wire.disconnect = func(e error) {
+					this.muconn.Lock()
+					defer this.muconn.Unlock()
+
+					if c != nil {
+						// handle errors during a connection
+						if e == io.EOF {
+							fmt.Println("< I: client", c.RemoteAddr(), "closed connection")
+						} else if e != nil {
+							fmt.Println("< E: error:", e)
+						}
+
+						this.wires.Remove(c)
+						if this.OnClose != nil {
+							this.OnClose(c)
+						}
+						c = nil
+					}
+				}
+
+				this.wires.Put(c, wire)
+
 				go wire.writer(c)
 				go wire.reader(c)
 				go wire.runHandler()
@@ -1626,101 +1694,133 @@ func (this *Server) send(wire *Wire, kind EKind, name string, payload interface{
 
 	err = UNKNOWNTOPIC
 	if msg.kind == PUSH || msg.kind == REQ {
-		this.wires.Rotate(func(w *Wired) bool {
-			// does not send to self
-			if wire == nil || wire != w.wire {
-				// REQ can also receive multiple messages from ONE replier
-				err = <-w.wire.send(msg)
-				// exit on success
-				if err == nil {
-					return false
+		go func() {
+			ws, cursor := this.wires.Rotate()
+			l := NewLooper(cursor, len(ws))
+			for l.HasNext() {
+				w := ws[l.Next()]
+				// does not send to self
+				if wire == nil || wire != w.wire {
+					// REQ can also receive multiple messages from ONE replier
+					err = <-w.wire.send(msg)
+					// exit on success
+					if err == nil {
+						break
+					}
 				}
 			}
-			return true
-		})
-		errch <- err
+			errch <- err
+		}()
 	} else if msg.kind == PUB {
 		// collects wires into groups. They will be called last.
-		groups := make(map[string][]*Wired)
-		this.wires.Rotate(func(w *Wired) bool {
-			// does not send to self
-			if wire == nil || wire != w.wire {
-				if w.wire.groupId == "" {
-					w.wire.send(msg)
-				} else {
-					wires := groups[w.wire.groupId]
-					if wires == nil {
-						wires = make([]*Wired, 0)
-					}
-					// TODO this is enificient. better with linked lists?
-					groups[w.wire.groupId] = append(wires, w)
-				}
-			}
-			return true
-		})
-		// acquires locks
-		this.muconn.Lock()
-		defer this.muconn.Unlock()
-		this.wires.mu.Lock()
-		defer this.wires.mu.Unlock()
-		// calls all elements of all groups
-		for _, group := range groups {
-			go func(ws []*Wired) {
-				// Stop processing the group if one succeeds.
-				for _, w := range ws {
-					if w.conn != nil {
-						e := <-w.wire.send(msg)
-						if e == nil {
-							break
+		groups, cursor := this.wires.RotateGroups()
+		go func() {
+			for id, group := range groups {
+				if id == "" {
+					l := NewLooper(cursor, len(group))
+					for l.HasNext() {
+						w := group[l.Next()]
+						// do not send to self
+						if wire == nil || wire != w.wire {
+							e := <-w.wire.send(msg)
+							if e == nil {
+								err = nil
+							}
 						}
 					}
+				} else {
+					go func(ws []*Wired) {
+						size := len(ws)
+						l := NewLooper(cursor%size, size)
+						for l.HasNext() {
+							w := ws[l.Next()]
+							// do not send to self
+							if wire == nil || wire != w.wire {
+								e := <-w.wire.send(msg)
+								// send only to one.
+								// stop if there was a success.
+								if e == nil {
+									err = nil
+									break
+								}
+							}
+						}
+					}(group)
 				}
-			}(group)
-		}
-		errch <- nil
+			}
+			errch <- err
+		}()
 	} else if msg.kind == REQALL {
 		var wg sync.WaitGroup
 		// we wrap the reply handler so that we can control the number o replies delivered.
 		handler := msg.handler
 		msg.handler = func(ctx Response) {
-			if ctx.Last() {
-				defer wg.Done()
-			}
-			// since the end mark will be passed to the caller when ALL replies from ALL replyiers arrive,
+			// since the end mark will be passed to the caller when ALL replies from ALL repliers arrive,
 			// the handler must be called only if it is not a end marker.
 			// It is also necessary to adjust the kind so that a last kind (REQ, ERR) is not passed.
 			if !ctx.EndMark() {
+				kind := ctx.Kind
 				if ctx.Kind == REP {
 					ctx.Kind = REP_PARTIAL
 				} else if ctx.Kind == ERR {
 					ctx.Kind = ERR_PARTIAL
 				}
 				handler(ctx)
+				// resets the kind
+				ctx.Kind = kind
 			}
 		}
 
-		this.wires.Rotate(func(w *Wired) bool {
-			// do not send to self
-			if wire == nil || wire != w.wire {
-				wg.Add(1)
-				// increment reply counter
-				ch := w.wire.send(msg)
-				go func() {
-					// waits for the request completion
-					e := <-ch
-					if e == nil {
-						err = nil // at least one got through
-					} else {
-						// since handler is not going to be called
-						wg.Done()
+		groups, cursor := this.wires.RotateGroups()
+		for id, group := range groups {
+			if id == "" {
+				l := NewLooper(cursor, len(group))
+				for l.HasNext() {
+					w := group[l.Next()]
+					// do not send to self
+					if wire == nil || wire != w.wire {
+						// increment reply counter
+						wg.Add(1)
+						ch := w.wire.send(msg)
+						go func() {
+							// waits for the request completion
+							e := <-ch
+							if e == nil {
+								err = nil // at least one got through
+							} else {
+								fmt.Println("< I:", e)
+							}
+							wg.Done()
+						}()
 					}
+				}
+			} else {
+				// increment reply counter
+				wg.Add(1)
+				l := NewLooper(cursor, len(group))
+				go func() {
+					for l.HasNext() {
+						w := group[l.Next()]
+						// do not send to self
+						if wire == nil || wire != w.wire {
+							// waits for the request completion
+							e := <-w.wire.send(msg)
+							if e == nil {
+								err = nil // at least one got through
+								wg.Done()
+								return
+							}
+						}
+					}
+					// if it got here none was successful
+					wg.Done()
 				}()
 			}
-			return true
-		})
+		}
 		go func() {
 			// Wait for all requests to complete.
 			wg.Wait()
+			fmt.Println("< D: all requests finnished")
 			// pass the end mark
 			handler(NewResponse(wire, nil, ACK, 0, nil))
 			errch <- err
@@ -1731,7 +1831,7 @@ func (this *Server) send(wire *Wire, kind EKind, name string, payload interface{
 }
 
 // name can have an '*' at the end, meaning that it will handle messages
-// with the destiny name starting with the reply name whitout the '*'.
+// with the destiny name starting with the reply name (whitout the '*'9.
 // When handling request messages, the function handler can have a return value and/or an error.
 // When handling publish/push messages, any return from the function handler is discarded.
 func (this *Server) Handle(name string, fun interface{}) {
@@ -1742,12 +1842,12 @@ func (this *Server) Handle(name string, fun interface{}) {
 	this.muhnd.Unlock()
 
 	msg, _ := this.createEnvelope(SUB, name, nil, nil, this.timeout)
-	this.wires.Do(func(w *Wired) bool {
-		if w.conn != nil {
-			w.wire.send(msg)
-		}
-		return true
-	})
+	ws, cursor := this.wires.Get()
+	l := NewLooper(cursor, len(ws))
+	for l.HasNext() {
+		w := ws[l.Next()]
+		w.wire.send(msg)
+	}
 }
 
 // Messages are from one client and delivered to another client.
@@ -1777,12 +1877,12 @@ func (this *Server) Cancel(name string) {
 	this.muhnd.Unlock()
 
 	msg, _ := this.createEnvelope(UNSUB, name, nil, nil, this.timeout)
-	this.wires.Do(func(w *Wired) bool {
-		if w.conn != nil {
-			w.wire.send(msg)
-		}
-		return true
-	})
+	ws, cursor := this.wires.Get()
+	l := NewLooper(cursor, len(ws))
+	for l.HasNext() {
+		w := ws[l.Next()]
+		w.wire.send(msg)
+	}
 }
 
 /*
@@ -1818,7 +1918,7 @@ func Route(name string, src Duplexer, dest Duplexer, relayTimeout time.Duration,
 			}
 		}
 
-		dest.Send(ctx.Kind, ctx.Name, ctx.Reply(), func(c Response) {
+		dest.Send(ctx.Kind, ctx.Name, ctx.Request(), func(c Response) {
 			ctx.SendAs(c.Kind, c.Reply())
 		}, relayTimeout)
 	})

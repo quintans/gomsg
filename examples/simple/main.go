@@ -44,7 +44,7 @@ func main() {
 		}, time.Second)
 	*/
 
-	time.Sleep(time.Millisecond * 100)
+	time.Sleep(time.Millisecond * 2000)
 	fmt.Println("I: close...")
 	cli.Destroy()
 	time.Sleep(time.Millisecond * 100)

@@ -7,6 +7,11 @@ import (
 	"github.com/quintans/gomsg"
 )
 
+const (
+	MESSAGE = "World!"
+	REPLY   = "Hello World!"
+)
+
 func main() {
 	// routing requests between server 1 and server 2
 	server1 := gomsg.NewServer()
@@ -16,14 +21,17 @@ func main() {
 	// all (*) messages arriving to server 1 are routed to server 2
 	gomsg.Route("*", server1, server2, time.Second,
 		func(ctx *gomsg.Request) bool {
-			fmt.Println("=====>incoming")
+			fmt.Println("===>routing incoming msg:", string(ctx.Request()))
 			return true
 		})
 
 	// client 1 connects to server 1
 	cli := gomsg.NewClient().Connect("localhost:7777")
 	cli2 := gomsg.NewClient()
-	cli2.Handle("HELLO", func(ctx gomsg.Response, m string) (string, error) {
+	cli2.Handle("HELLO", func(ctx *gomsg.Request, m string) (string, error) {
+		if m != MESSAGE {
+			fmt.Printf("###> EXPECTED '%s'. RECEIVED '%s'.\n", MESSAGE, m)
+		}
 		fmt.Println("<=== processing:", m, "from", ctx.Connection().RemoteAddr())
 		return fmt.Sprintf("Hello %s", m), nil
 	})
@@ -37,7 +45,10 @@ func main() {
 			fmt.Println("W: error:", err)
 		}
 	*/
-	err = <-cli.Request("HELLO", "World!", func(ctx gomsg.Response, r string, e error) {
+	err = <-cli.Request("HELLO", MESSAGE, func(ctx gomsg.Response, r string, e error) {
+		if r != REPLY {
+			fmt.Printf("###> EXPECTED '%s'. RECEIVED '%s'.\n", REPLY, r)
+		}
 		fmt.Println("=================> reply:", r, e, "from", ctx.Connection().RemoteAddr())
 	})
 	if err != nil {

@@ -32,5 +32,5 @@ func main() {
 
 		<-server.Publish("SUB", "teste")
 	*/
-	time.Sleep(time.Millisecond * 100)
+	time.Sleep(time.Second)
 }

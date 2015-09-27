@@ -27,8 +27,12 @@ func main() {
 	cli.Handle("SUB", func(m string) {
 		fmt.Println("<=== handling pub-sub:", m)
 	})
+	time.Sleep(time.Millisecond * 100)
 
-	server.Publish("SUB", "teste")
+	e = <-server.Publish("SUB", "teste")
+	if e != nil {
+		fmt.Println("===> SUB error:", e)
+	}
 
 	time.Sleep(time.Millisecond * 100)
 }

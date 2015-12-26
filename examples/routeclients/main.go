@@ -11,16 +11,7 @@ func main() {
 	// all messages arriving to the server are routed to the clients
 	server := gomsg.NewServer()
 	server.Listen(":7777")
-	server.Route("*", time.Second, nil)
-	/*
-		server.Route("*", time.Second,
-			func(ctx gomsg.IRequest) {
-				fmt.Println("=====>incoming: ", string(ctx.Request()))
-			},
-			func(ctx gomsg.IResponse) {
-				fmt.Println("<=====returning: ", string(ctx.Reply()))
-			})
-	*/
+	server.Route("*", time.Second, nil, nil)
 
 	cli := gomsg.NewClient()
 	cli.Handle("HELLO", func(ctx *gomsg.Request, m string) (string, error) {

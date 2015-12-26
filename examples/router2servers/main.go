@@ -23,7 +23,8 @@ func main() {
 		func(ctx *gomsg.Request) bool {
 			fmt.Println("===>routing incoming msg:", string(ctx.Request()))
 			return true
-		})
+		},
+		nil)
 
 	// client 1 connects to server 1
 	cli := gomsg.NewClient().Connect("localhost:7777")

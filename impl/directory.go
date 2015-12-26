@@ -156,7 +156,7 @@ func NewPeer(dirAddr string, bindAddr string, codec gomsg.Codec) *Peer {
 	this.local.Listen(bindAddr)
 
 	this.dir = gomsg.NewClient().SetCodec(codec)
-	this.dir.OnConnect = func(c net.Conn) {
+	this.dir.OnConnect = func(w *gomsg.Wired) {
 		this.dir.Handle("NEW", func(peerAddr string) {
 			if peerAddr != this.self {
 				fmt.Println("====>", bindAddr, ": new peer at", peerAddr)

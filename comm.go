@@ -498,7 +498,7 @@ func (this *Wire) SetTimeout(timeout time.Duration) {
 	this.timeout = timeout
 }
 
-func (this *Wire) send(msg Envelope) <-chan error {
+func (this *Wire) Send(msg Envelope) <-chan error {
 	msg.errch = make(chan error, 1)
 	// check first if the peer has the topic before sending.
 	// This is done because remote topics are only available after a connection
@@ -971,7 +971,7 @@ type ClientServer struct {
 
 	timeout   time.Duration
 	muconn    sync.RWMutex
-	OnConnect func(c net.Conn)
+	OnConnect func(w *Wired)
 	OnClose   func(c net.Conn)
 }
 
@@ -1254,7 +1254,7 @@ func (this *Client) dial(retry time.Duration) {
 		this.conn = c
 
 		if this.OnConnect != nil {
-			this.OnConnect(c)
+			this.OnConnect(&Wired{c, this.wire})
 		}
 	}
 }
@@ -1279,7 +1279,7 @@ func (this *Client) Handle(name string, fun interface{}) {
 
 	if this.conn != nil {
 		msg, _ := this.createEnvelope(SUB, name, nil, nil, this.timeout)
-		this.wire.send(msg)
+		this.wire.Send(msg)
 	}
 }
 
@@ -1293,7 +1293,7 @@ func (this *Client) Cancel(name string) {
 
 	if this.conn != nil {
 		msg, _ := this.createEnvelope(UNSUB, name, nil, nil, this.timeout)
-		this.wire.send(msg)
+		this.wire.Send(msg)
 	}
 }
 
@@ -1355,12 +1355,20 @@ func (this *Client) Send(kind EKind, name string, payload interface{}, handler i
 		ch <- err
 		return ch
 	}
-	return this.wire.send(msg)
+	return this.wire.Send(msg)
 }
 
 type Wired struct {
 	conn net.Conn
 	wire *Wire
+}
+
+func (this *Wired) Conn() net.Conn {
+	return this.conn
+}
+
+func (this *Wired) Wire() *Wire {
+	return this.wire
 }
 
 // Connections are grouped accordingly to its group id.
@@ -1396,14 +1404,14 @@ func (this *Wires) Destroy() {
 	this.groups = make(map[string][]*Wired)
 }
 
-func (this *Wires) Put(conn net.Conn, wire *Wire) {
+func (this *Wires) Put(conn net.Conn, wire *Wire) *Wired {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 
 	for _, v := range this.wires {
 		if v.conn == conn {
 			v.wire = wire
-			return
+			return v
 		}
 	}
 	wired := &Wired{conn, wire}
@@ -1413,9 +1421,22 @@ func (this *Wires) Put(conn net.Conn, wire *Wire) {
 		group = make([]*Wired, 0)
 	}
 	this.groups[wire.groupId] = append(group, wired)
+	return wired
 }
 
-func (this *Wires) Remove(conn net.Conn) {
+func (this *Wires) Get(conn net.Conn) *Wired {
+	this.mu.Lock()
+	defer this.mu.Unlock()
+
+	for _, v := range this.wires {
+		if v.conn == conn {
+			return v
+		}
+	}
+	return nil
+}
+
+func (this *Wires) Kill(conn net.Conn) {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 
@@ -1442,7 +1463,7 @@ func remove(conn net.Conn, wires []*Wired) ([]*Wired, *Wired) {
 	return wires, nil
 }
 
-func (this *Wires) Get() ([]*Wired, int) {
+func (this *Wires) GetAll() ([]*Wired, int) {
 	return this.list(false)
 }
 
@@ -1510,12 +1531,12 @@ type Server struct {
 	ClientServer
 
 	listener net.Listener
-	wires    *Wires
+	Wires    *Wires
 }
 
 func NewServer() *Server {
 	server := new(Server)
-	server.wires = NewWires()
+	server.Wires = NewWires()
 	server.codec = JsonCodec{}
 	server.timeout = time.Second * 20
 	server.handlers = make(map[string]func(ctx *Request))
@@ -1570,7 +1591,7 @@ func (this *Server) Listen(service string) error {
 							fmt.Println("< E: error:", e)
 						}
 
-						this.wires.Remove(c)
+						this.Wires.Kill(c)
 						if this.OnClose != nil {
 							this.OnClose(c)
 						}
@@ -1578,14 +1599,14 @@ func (this *Server) Listen(service string) error {
 					}
 				}
 
-				this.wires.Put(c, wire)
+				w := this.Wires.Put(c, wire)
 
 				go wire.writer(c)
 				go wire.reader(c)
 				go wire.runHandler()
 
 				if this.OnConnect != nil {
-					this.OnConnect(c)
+					this.OnConnect(w)
 				}
 			}
 		}
@@ -1649,7 +1670,7 @@ func findHandler(name string, handlers map[string]func(ctx *Request)) func(c *Re
 }
 
 func (this *Server) Destroy() {
-	this.wires.Destroy()
+	this.Wires.Destroy()
 	this.listener.Close()
 }
 
@@ -1695,14 +1716,14 @@ func (this *Server) send(wire *Wire, kind EKind, name string, payload interface{
 	err = UNKNOWNTOPIC
 	if msg.kind == PUSH || msg.kind == REQ {
 		go func() {
-			ws, cursor := this.wires.Rotate()
+			ws, cursor := this.Wires.Rotate()
 			l := NewLooper(cursor, len(ws))
 			for l.HasNext() {
 				w := ws[l.Next()]
 				// does not send to self
 				if wire == nil || wire != w.wire {
 					// REQ can also receive multiple messages from ONE replier
-					err = <-w.wire.send(msg)
+					err = <-w.wire.Send(msg)
 					// exit on success
 					if err == nil {
 						break
@@ -1713,7 +1734,7 @@ func (this *Server) send(wire *Wire, kind EKind, name string, payload interface{
 		}()
 	} else if msg.kind == PUB {
 		// collects wires into groups. They will be called last.
-		groups, cursor := this.wires.RotateGroups()
+		groups, cursor := this.Wires.RotateGroups()
 		go func() {
 			for id, group := range groups {
 				if id == "" {
@@ -1722,7 +1743,7 @@ func (this *Server) send(wire *Wire, kind EKind, name string, payload interface{
 						w := group[l.Next()]
 						// do not send to self
 						if wire == nil || wire != w.wire {
-							e := <-w.wire.send(msg)
+							e := <-w.wire.Send(msg)
 							if e == nil {
 								err = nil
 							}
@@ -1736,7 +1757,7 @@ func (this *Server) send(wire *Wire, kind EKind, name string, payload interface{
 							w := ws[l.Next()]
 							// do not send to self
 							if wire == nil || wire != w.wire {
-								e := <-w.wire.send(msg)
+								e := <-w.wire.Send(msg)
 								// send only to one.
 								// stop if there was a success.
 								if e == nil {
@@ -1771,7 +1792,7 @@ func (this *Server) send(wire *Wire, kind EKind, name string, payload interface{
 			}
 		}
 
-		groups, cursor := this.wires.RotateGroups()
+		groups, cursor := this.Wires.RotateGroups()
 		for id, group := range groups {
 			if id == "" {
 				l := NewLooper(cursor, len(group))
@@ -1781,7 +1802,7 @@ func (this *Server) send(wire *Wire, kind EKind, name string, payload interface{
 					if wire == nil || wire != w.wire {
 						// increment reply counter
 						wg.Add(1)
-						ch := w.wire.send(msg)
+						ch := w.wire.Send(msg)
 						go func() {
 							// waits for the request completion
 							e := <-ch
@@ -1804,7 +1825,7 @@ func (this *Server) send(wire *Wire, kind EKind, name string, payload interface{
 						// do not send to self
 						if wire == nil || wire != w.wire {
 							// waits for the request completion
-							e := <-w.wire.send(msg)
+							e := <-w.wire.Send(msg)
 							if e == nil {
 								err = nil // at least one got through
 								wg.Done()
@@ -1842,31 +1863,35 @@ func (this *Server) Handle(name string, fun interface{}) {
 	this.muhnd.Unlock()
 
 	msg, _ := this.createEnvelope(SUB, name, nil, nil, this.timeout)
-	ws, cursor := this.wires.Get()
+	ws, cursor := this.Wires.GetAll()
 	l := NewLooper(cursor, len(ws))
 	for l.HasNext() {
 		w := ws[l.Next()]
-		w.wire.send(msg)
+		w.wire.Send(msg)
 	}
 }
 
 // Messages are from one client and delivered to another client.
 // The sender client does not receive his message.
 // The handler execution is canceled. Arriving replies from endpoints are piped to the requesting wire
-func (this *Server) Route(name string, timeout time.Duration, proceed func(c *Request) bool) {
+func (this *Server) Route(name string, timeout time.Duration, before func(x *Request) bool, after func(x *Response)) {
 	// This handle is called by the wire.
 	// Since this handler has no declared return type, upon return no data will be sent to the caller.
 	// Eventually the reply must be sent or a time will occur.
 	this.Handle(name, func(r *Request) {
-		if proceed != nil {
-			if !proceed(r) {
-				return
-			}
+		// decide if it should continue (and do other thinhs like store the request data).
+		if before != nil && !before(r) {
+			return
 		}
 
 		wire := r.wire
-		this.send(wire, r.Kind, r.Name, r.Request(), func(c Response) {
-			wire.reply(c.Kind, r.sequence, c.Reply()) // sending data to the caller
+		this.send(wire, r.Kind, r.Name, r.Request(), func(resp Response) {
+			if after != nil {
+				// do something (ex: store the response data)
+				after(&resp)
+			}
+
+			wire.reply(resp.Kind, r.sequence, resp.Reply()) // sending data to the caller
 		}, timeout)
 	})
 }
@@ -1877,11 +1902,11 @@ func (this *Server) Cancel(name string) {
 	this.muhnd.Unlock()
 
 	msg, _ := this.createEnvelope(UNSUB, name, nil, nil, this.timeout)
-	ws, cursor := this.wires.Get()
+	ws, cursor := this.Wires.GetAll()
 	l := NewLooper(cursor, len(ws))
 	for l.HasNext() {
 		w := ws[l.Next()]
-		w.wire.send(msg)
+		w.wire.Send(msg)
 	}
 }
 
@@ -1910,16 +1935,18 @@ var _ Duplexer = &Client{}
 var _ Duplexer = &Server{}
 
 // Route messages between to different binding ports.
-func Route(name string, src Duplexer, dest Duplexer, relayTimeout time.Duration, incoming func(c *Request) bool) {
-	src.Handle(name, func(ctx *Request) {
-		if incoming != nil {
-			if !incoming(ctx) {
-				return
-			}
+func Route(name string, src Duplexer, dest Duplexer, relayTimeout time.Duration, before func(c *Request) bool, after func(c *Response)) {
+	src.Handle(name, func(req *Request) {
+		if before != nil && !before(req) {
+			return
 		}
 
-		dest.Send(ctx.Kind, ctx.Name, ctx.Request(), func(c Response) {
-			ctx.SendAs(c.Kind, c.Reply())
+		dest.Send(req.Kind, req.Name, req.Request(), func(resp Response) {
+			if after != nil {
+				after(&resp)
+			}
+
+			req.SendAs(resp.Kind, resp.Reply())
 		}, relayTimeout)
 	})
 

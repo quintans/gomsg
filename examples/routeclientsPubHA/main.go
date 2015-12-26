@@ -11,7 +11,7 @@ func main() {
 	// all messages arriving to the server are routed to the clients
 	server := gomsg.NewServer()
 	server.Listen(":7777")
-	server.Route("*", time.Second, nil)
+	server.Route("*", time.Second, nil, nil)
 
 	ungrouped := 0
 	cli := gomsg.NewClient()

@@ -53,11 +53,11 @@ time.Sleep(time.Millisecond * 100)
 
 ```
 
-Another nice feature is possibility of grouping clients for Publishing.
+Another nice feature is possibility of grouping clients.
 
 If a client identifies the group that it belongs the server will only send the message
 to one of the clients. This way we can have the server publish messages and have the clients
-tho decide if they want to behave like Publish/Subscribe (ungrouped) or like Push/Push (grouped).
+decide if they want to behave like Publish/Subscribe (ungrouped) or like Push/Push (grouped).
 
 ```go
 server := gomsg.NewServer()
@@ -104,5 +104,6 @@ Go 1.1+
 
 Todo
 -
-* Tests
+* More Tests
 * Documentation
+* replace `fmt.Println` from the code with a logging framework

@@ -34,8 +34,6 @@ package gomsg
 import (
 	"bufio"
 	"bytes"
-	//"crypto/rand"
-	//"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -45,7 +43,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/quintans/toolkit/log"
 )
+
+var logger = log.LoggerFor("github.com/quintans/gomsg")
 
 const (
 	_   EKind = iota
@@ -712,7 +714,7 @@ func (this *Wire) reader(c net.Conn) {
 			if cb != nil {
 				cb <- NewResponse(this, c, kind, seq, data)
 			} else {
-				fmt.Printf("< No callback found for kind=%s, sequence=%d.\n", kind, seq)
+				logger.Debugf("< No callback found for kind=%s, sequence=%d.", kind, seq)
 			}
 		}
 	}
@@ -1224,9 +1226,9 @@ func (this *Client) dial(retry time.Duration) {
 	// gets the connection
 	c, err := net.DialTimeout("tcp", this.addr, time.Second)
 	if err != nil {
-		fmt.Println("> I: failed to connect to", this.addr)
+		logger.Infof("> failed to connect to %s", this.addr)
 		if retry > 0 {
-			fmt.Println("> I: retry in", retry)
+			logger.Infof("> retry in %v", retry)
 			go func() {
 				time.Sleep(retry)
 				if this.reconnectMaxInterval > 0 && retry < this.reconnectMaxInterval {
@@ -1235,16 +1237,16 @@ func (this *Client) dial(retry time.Duration) {
 				this.dial(retry)
 			}()
 		} else {
-			fmt.Println("> I: NO retry will be performed!")
+			logger.Infof("> NO retry will be performed!")
 		}
 		return
 	}
 
-	fmt.Println("> I: connected to", this.addr, "with", c.LocalAddr())
+	logger.Infof("> connected to %s with %s", this.addr, c.LocalAddr())
 	// topic exchange
 	err = this.handshake(c)
 	if err != nil {
-		fmt.Println("> E: error:", err)
+		logger.Errorf("> %s", err)
 		c.Close()
 	} else {
 		go this.wire.writer(c)
@@ -1555,18 +1557,18 @@ func (this *Server) Listen(service string) error {
 		return err
 	}
 	this.listener = l
-	fmt.Println("< listening at", l.Addr())
+	logger.Debugf("< listening at %s", l.Addr())
 	go func() {
 		for {
 			// notice that c is changed in the disconnect function
 			c, err := l.Accept()
 			if err != nil {
 				// happens when the listener is closed
-				//fmt.Println("< I: accepting no more due to error:", err)
-				fmt.Println("< I: Stoped listening at", l.Addr())
+				//logger.Infof("< accepting no more due to error: %s", err)
+				logger.Infof("< Stoped listening at %s", l.Addr())
 				return
 			}
-			fmt.Printf("< I: accepted connection from %s\n", c.RemoteAddr())
+			logger.Infof("< accepted connection from %s", c.RemoteAddr())
 
 			wire := NewWire(this.codec)
 			wire.findHandler = this.findHandler
@@ -1586,9 +1588,9 @@ func (this *Server) Listen(service string) error {
 					if c != nil {
 						// handle errors during a connection
 						if e == io.EOF {
-							fmt.Println("< I: client", c.RemoteAddr(), "closed connection")
+							logger.Infof("< client %s closed connection", c.RemoteAddr())
 						} else if e != nil {
-							fmt.Println("< E: error:", e)
+							logger.Errorf("< %s", e)
 						}
 
 						this.Wires.Kill(c)
@@ -1671,7 +1673,9 @@ func findHandler(name string, handlers map[string]func(ctx *Request)) func(c *Re
 
 func (this *Server) Destroy() {
 	this.Wires.Destroy()
-	this.listener.Close()
+	if this.listener != nil {
+		this.listener.Close()
+	}
 }
 
 // sends a message and waits for the reply
@@ -1809,7 +1813,7 @@ func (this *Server) send(wire *Wire, kind EKind, name string, payload interface{
 							if e == nil {
 								err = nil // at least one got through
 							} else {
-								fmt.Println("< I:", e)
+								logger.Infof("< %s", e)
 							}
 							wg.Done()
 						}()
@@ -1841,7 +1845,7 @@ func (this *Server) send(wire *Wire, kind EKind, name string, payload interface{
 		go func() {
 			// Wait for all requests to complete.
 			wg.Wait()
-			fmt.Println("< D: all requests finnished")
+			logger.Debugf("< all requests finnished")
 			// pass the end mark
 			handler(NewResponse(wire, nil, ACK, 0, nil))
 			errch <- err

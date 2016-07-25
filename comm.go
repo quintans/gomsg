@@ -17,7 +17,7 @@ package gomsg
 // * REP_PARTIAL - reply in a REQ_ALL
 // * ERR_PARTIAL - error in a  REQ_ALL
 // * ACK - acknowledges the delivery of a message by PUSH or the End Of Replies
-// * NACK - failed to acknowledges the delivery of a message by PUSH (sent by the endpoint)
+// * NACK - failed to acknowledge the delivery of a message by PUSH (sent by the endpoint)
 //
 // Sending messages has no buffering. If a destination is not present to consume the message
 // when it is sent, then the message will be lost.
@@ -86,9 +86,9 @@ func (this EKind) String() string {
 	idx := int(this)
 	if idx > 0 && idx <= len(kind_labels) {
 		return kind_labels[idx-1]
-	} else {
-		return fmt.Sprint("unknown:", idx)
 	}
+
+	return fmt.Sprint("unknown:", idx)
 }
 
 const FILTER_TOKEN = "*"
@@ -184,6 +184,7 @@ type Context struct {
 	sequence uint32
 }
 
+// Connection getter
 func (this *Context) Connection() net.Conn {
 	return this.conn
 }
@@ -301,7 +302,7 @@ func (this *Request) Reply() []byte {
 	return this.reply
 }
 
-// Terminates a series of replies by sending an ACK message to the caller.
+// Terminate terminates a series of replies by sending an ACK message to the caller.
 // It can also be used to reject a request, since this terminates the request without sending a reply payload.
 func (this *Request) Terminate() {
 	this.reset()
@@ -638,7 +639,7 @@ func (this *Wire) reader(c net.Conn) {
 		if err != nil {
 			break
 		}
-		var kind EKind = EKind(k)
+		var kind = EKind(k)
 
 		// sequence
 		var seq uint32
@@ -843,7 +844,7 @@ func createReplyHandler(codec Codec, fun interface{}) func(ctx Response) {
 
 	return func(ctx Response) {
 		var p reflect.Value
-		params := make([]reflect.Value, 0)
+		var params = make([]reflect.Value, 0)
 		if hasContext {
 			params = append(params, reflect.ValueOf(ctx))
 		}
@@ -862,7 +863,7 @@ func createReplyHandler(codec Codec, fun interface{}) func(ctx Response) {
 			}
 		}
 		if hasError {
-			var err error = ctx.Fault()
+			var err = ctx.Fault()
 			params = append(params, reflect.ValueOf(&err).Elem())
 		}
 
@@ -909,7 +910,7 @@ func createRequestHandler(codec Codec, fun interface{}) func(ctx *Request) {
 
 	return func(ctx *Request) {
 		var p reflect.Value
-		params := make([]reflect.Value, 0)
+		var params = make([]reflect.Value, 0)
 		if hasContext {
 			params = append(params, reflect.ValueOf(ctx))
 		}
@@ -967,7 +968,6 @@ func createRequestHandler(codec Codec, fun interface{}) func(ctx *Request) {
 }
 
 type ClientServer struct {
-	codec    Codec
 	muhnd    sync.RWMutex
 	handlers map[string]func(ctx *Request)
 
@@ -977,17 +977,17 @@ type ClientServer struct {
 	OnClose   func(c net.Conn)
 }
 
-// timeout used to send data
+// SetTimeout sets the timeout used to send data
 func (this *ClientServer) SetTimeout(timeout time.Duration) {
 	this.timeout = timeout
 }
 
 // If the type of the payload is *mybus.Msg
 // it will ignore encoding and use the internal bytes as the payload.
-func (this *ClientServer) createEnvelope(kind EKind, name string, payload interface{}, success interface{}, timeout time.Duration) (Envelope, error) {
+func createEnvelope(kind EKind, name string, payload interface{}, success interface{}, timeout time.Duration, codec Codec) (Envelope, error) {
 	var handler func(ctx Response)
 	if success != nil {
-		handler = createReplyHandler(this.codec, success)
+		handler = createReplyHandler(codec, success)
 	}
 
 	msg := Envelope{
@@ -1005,7 +1005,7 @@ func (this *ClientServer) createEnvelope(kind EKind, name string, payload interf
 			msg.payload = m.buffer.Bytes()
 		default:
 			var err error
-			msg.payload, err = this.codec.Encode(payload)
+			msg.payload, err = codec.Encode(payload)
 			if err != nil {
 				return Envelope{}, err
 			}
@@ -1026,13 +1026,11 @@ type Client struct {
 }
 
 func NewClient() *Client {
-	codec := JsonCodec{}
 	this := &Client{
-		wire:                 NewWire(codec),
+		wire:                 NewWire(JsonCodec{}),
 		reconnectInterval:    time.Millisecond * 100,
 		reconnectMaxInterval: 0,
 	}
-	this.codec = codec
 	this.timeout = time.Second * 20
 	this.handlers = make(map[string]func(ctx *Request))
 
@@ -1045,7 +1043,7 @@ func NewClient() *Client {
 
 	this.wire.disconnect = func(e error) {
 		//this.Disconnect()
-		this.disconnect()
+		this.disconnect(make(chan error, 1))
 	}
 	return this
 }
@@ -1062,7 +1060,6 @@ func (this *Client) SetReconnectMaxInterval(reconnectMaxInterval time.Duration) 
 
 func (this *Client) SetCodec(codec Codec) *Client {
 	this.wire.codec = codec
-	this.codec = codec
 	return this
 }
 
@@ -1079,19 +1076,19 @@ func (this *Client) handshake(c net.Conn) error {
 	payload := make([]string, size)
 	payload[0] = this.wire.groupId
 	i := 1
-	for k, _ := range this.handlers {
+	for k := range this.handlers {
 		payload[i] = k
 		i++
 	}
 	this.muhnd.Unlock()
 
-	err := serializeHanshake(c, this.codec, this.timeout, payload)
+	err := serializeHanshake(c, this.wire.codec, this.timeout, payload)
 	if err != nil {
 		return err
 	}
 
 	// get reply
-	_, remoteTopics, err := deserializeHandshake(c, this.codec, this.timeout, false)
+	_, remoteTopics, err := deserializeHandshake(c, this.wire.codec, this.timeout, false)
 	if err != nil {
 		return err
 	}
@@ -1149,7 +1146,7 @@ func deserializeHandshake(c net.Conn, codec Codec, timeout time.Duration, isFrom
 			return "", nil, err
 		}
 		topics = make([]string, size)
-		var length int = int(size)
+		var length = int(size)
 		for i := 0; i < length; i++ {
 			topics[i], err = is.ReadString()
 			if err != nil {
@@ -1170,14 +1167,17 @@ func deserializeHandshake(c net.Conn, codec Codec, timeout time.Duration, isFrom
 }
 
 // connect is seperated to allow the definition and use of OnConnect
-func (this *Client) Connect(addr string) *Client {
+func (this *Client) Connect(addr string) <-chan error {
 	this.addr = addr
-	this.dial(this.reconnectInterval)
-	return this
+	var cherr = make(chan error, 1)
+	this.dial(this.reconnectInterval, cherr)
+	return cherr
 }
 
-func (this *Client) Reconnect() {
-	this.disconnect()
+func (this *Client) Reconnect() <-chan error {
+	var cherr = make(chan error, 1)
+	this.disconnect(cherr)
+	return cherr
 }
 
 func (this *Client) Disconnect() {
@@ -1193,7 +1193,7 @@ func (this *Client) Disconnect() {
 	}
 }
 
-func (this *Client) disconnect() {
+func (this *Client) disconnect(cherr chan error) {
 	this.muconn.Lock()
 	defer this.muconn.Unlock()
 
@@ -1205,7 +1205,7 @@ func (this *Client) disconnect() {
 		this.conn = nil
 		if this.reconnectInterval > 0 {
 			go func(interval time.Duration) {
-				this.dial(interval)
+				this.dial(interval, cherr)
 			}(this.reconnectInterval)
 		}
 	}
@@ -1217,9 +1217,14 @@ func (this *Client) Destroy() {
 	this.Disconnect()
 }
 
+// Active check if this wire is running, i.e., if it has a connection
+func (this *Client) Active() bool {
+	return this.conn != nil
+}
+
 // tries do dial. If dial fails and if reconnectInterval > 0
 // it schedules a new try within reconnectInterval milliseconds
-func (this *Client) dial(retry time.Duration) {
+func (this *Client) dial(retry time.Duration, cherr chan error) {
 	this.muconn.Lock()
 	defer this.muconn.Unlock()
 
@@ -1234,7 +1239,7 @@ func (this *Client) dial(retry time.Duration) {
 				if this.reconnectMaxInterval > 0 && retry < this.reconnectMaxInterval {
 					retry = retry * 2
 				}
-				this.dial(retry)
+				this.dial(retry, cherr)
 			}()
 		} else {
 			logger.Infof("> NO retry will be performed!")
@@ -1259,6 +1264,7 @@ func (this *Client) dial(retry time.Duration) {
 			this.OnConnect(&Wired{c, this.wire})
 		}
 	}
+	cherr <- err
 }
 
 func (this *Client) Connection() net.Conn {
@@ -1280,7 +1286,7 @@ func (this *Client) Handle(name string, fun interface{}) {
 	defer this.muconn.Unlock()
 
 	if this.conn != nil {
-		msg, _ := this.createEnvelope(SUB, name, nil, nil, this.timeout)
+		msg, _ := createEnvelope(SUB, name, nil, nil, this.timeout, this.wire.codec)
 		this.wire.Send(msg)
 	}
 }
@@ -1294,48 +1300,50 @@ func (this *Client) Cancel(name string) {
 	defer this.muconn.Unlock()
 
 	if this.conn != nil {
-		msg, _ := this.createEnvelope(UNSUB, name, nil, nil, this.timeout)
+		msg, _ := createEnvelope(UNSUB, name, nil, nil, this.timeout, this.wire.codec)
 		this.wire.Send(msg)
 	}
 }
 
-// sends a message and waits for the reply
+// Request sends a message and waits for the reply
 // If the type of the payload is *mybus.Msg
 // it will ignore encoding and use the internal bytes as the payload.
 func (this *Client) Request(name string, payload interface{}, handler interface{}) <-chan error {
 	return this.RequestTimeout(name, payload, handler, this.timeout)
 }
 
+// RequestTimeout is the same as Request with a timeout definition
 // If the type of the payload is *mybus.Msg
 // it will ignore encoding and use the internal bytes as the payload.
 func (this *Client) RequestTimeout(name string, payload interface{}, handler interface{}, timeout time.Duration) <-chan error {
 	return this.Send(REQ, name, payload, handler, timeout)
 }
 
-// Requests messages to all connected clients of the same server. If a client is not connected it is forever lost.
+// RequestAll requests messages to all connected clients of the same server. If a client is not connected it is forever lost.
 func (this *Client) RequestAll(name string, payload interface{}, handler interface{}) <-chan error {
 	return this.Send(REQALL, name, payload, handler, this.timeout)
 }
 
-// Requests messages to all connected clients of the same server. If a client is not connected it is forever lost.
+// RequestAllTimeout requests messages to all connected clients of the same server. If a client is not connected it is forever lost.
 func (this *Client) RequestAllTimeout(name string, payload interface{}, handler interface{}, timeout time.Duration) <-chan error {
 	return this.Send(REQALL, name, payload, handler, timeout)
 }
 
-// sends a message and receive an acknowledge
+// Push sends a message and receive an acknowledge
 // If the type of the payload is *mybus.Msg
 // it will ignore encoding and use the internal bytes as the payload.
 func (this *Client) Push(name string, m interface{}) <-chan error {
 	return this.PushTimeout(name, m, this.timeout)
 }
 
+// PushTimeout  is the same as Push with a timeout definition
 // If the type of the payload is *mybus.Msg
 // it will ignore encoding and use the internal bytes as the payload.
 func (this *Client) PushTimeout(name string, m interface{}, timeout time.Duration) <-chan error {
 	return this.Send(PUSH, name, m, nil, timeout)
 }
 
-// sends a message without any reply
+// Publish sends a message without any reply
 // If the type of the payload is *mybus.Msg
 // it will ignore encoding and use the internal bytes as the payload.
 func (this *Client) Publish(name string, m interface{}) <-chan error {
@@ -1351,7 +1359,7 @@ func (this *Client) PublishTimeout(name string, m interface{}, timeout time.Dura
 // When the payload is of type []byte it passes the raw bytes without encoding.
 // When the payload is of type mybus.Msg it passes the FRAMED raw bytes without encoding.
 func (this *Client) Send(kind EKind, name string, payload interface{}, handler interface{}, timeout time.Duration) <-chan error {
-	msg, err := this.createEnvelope(kind, name, payload, handler, timeout)
+	msg, err := createEnvelope(kind, name, payload, handler, timeout, this.wire.codec)
 	if err != nil {
 		ch := make(chan error, 1)
 		ch <- err
@@ -1373,6 +1381,7 @@ func (this *Wired) Wire() *Wire {
 	return this.wire
 }
 
+// Wires manages a collection of connections as if they were one.
 // Connections are grouped accordingly to its group id.
 // A wire with an empty group id means all nodes are different.
 //
@@ -1384,13 +1393,21 @@ type Wires struct {
 	wires  []*Wired
 	groups map[string][]*Wired
 	cursor int
+	Codec  Codec
 }
 
-func NewWires() *Wires {
+// NewWires creates a Wires structure
+func NewWires(codec Codec) *Wires {
 	return &Wires{
 		wires:  make([]*Wired, 0),
 		groups: make(map[string][]*Wired),
+		Codec:  codec,
 	}
+}
+
+func (this *Wires) SetCodec(codec Codec) *Wires {
+	this.Codec = codec
+	return this
 }
 
 func (this *Wires) Destroy() {
@@ -1410,6 +1427,10 @@ func (this *Wires) Put(conn net.Conn, wire *Wire) *Wired {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 
+	// set common codec
+	wire.codec = this.Codec
+
+	// if already defined (same connection) return it
 	for _, v := range this.wires {
 		if v.conn == conn {
 			v.wire = wire
@@ -1427,11 +1448,17 @@ func (this *Wires) Put(conn net.Conn, wire *Wire) *Wired {
 }
 
 func (this *Wires) Get(conn net.Conn) *Wired {
+	return this.Find(func(w *Wired) bool {
+		return w.conn == conn
+	})
+}
+
+func (this *Wires) Find(fn func(w *Wired) bool) *Wired {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 
 	for _, v := range this.wires {
-		if v.conn == conn {
+		if fn(v) {
 			return v
 		}
 	}
@@ -1529,25 +1556,210 @@ func (this *Wires) RotateGroups() (map[string][]*Wired, int) {
 	return newMap, c
 }
 
+// Request sends a message and waits for the reply
+// If the type of the payload is *mybus.Msg it will ignore encoding and use the internal bytes as the payload. This is useful if we want to implement a broker.
+func (this *Wires) Request(name string, payload interface{}, handler interface{}) <-chan error {
+	return this.Send(REQ, name, payload, handler, time.Second)
+}
+
+// RequestAll requests messages to all connected clients. If a client is not connected it is forever lost.
+func (this *Wires) RequestAll(name string, payload interface{}, handler interface{}, timeout time.Duration) <-chan error {
+	return this.Send(REQALL, name, payload, handler, timeout)
+}
+
+// Push sends a message and receive an acknowledge
+// If the type of the payload is *mybus.Msg
+// it will ignore encoding and use the internal bytes as the payload.
+func (this *Wires) Push(name string, payload interface{}) <-chan error {
+	return this.Send(PUSH, name, payload, nil, time.Second)
+}
+
+// Publish sends a message without any reply
+// If the type of the payload is *mybus.Msg
+// it will ignore encoding and use the internal bytes as the payload.
+func (this *Wires) Publish(name string, payload interface{}) <-chan error {
+	return this.Send(PUB, name, payload, nil, time.Second)
+}
+
+// Send is the generic function to send messages
+// When the payload is of type []byte it passes the raw bytes without encoding.
+// When the payload is of type mybus.Msg it passes the FRAMED raw bytes without encoding.
+func (this *Wires) Send(kind EKind, name string, payload interface{}, handler interface{}, timeout time.Duration) <-chan error {
+	return this.SendSkip(nil, kind, name, payload, handler, timeout)
+}
+
+// SendSkip is the generic function to send messages with the possibility of ignoring the sender
+func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload interface{}, handler interface{}, timeout time.Duration) <-chan error {
+	msg, err := createEnvelope(kind, name, payload, handler, timeout, this.Codec)
+	errch := make(chan error, 1)
+	if err != nil {
+		errch <- err
+		return errch
+	}
+
+	err = UNKNOWNTOPIC
+	if msg.kind == PUSH || msg.kind == REQ {
+		go func() {
+			ws, cursor := this.Rotate()
+			l := NewLooper(cursor, len(ws))
+			for l.HasNext() {
+				w := ws[l.Next()]
+				// does not send to self
+				if skipWire == nil || skipWire != w.wire {
+					// REQ can also receive multiple messages from ONE replier
+					err = <-w.wire.Send(msg)
+					// exit on success
+					if err == nil {
+						break
+					}
+				}
+			}
+			errch <- err
+		}()
+	} else if msg.kind == PUB {
+		// collects wires into groups. They will be called last.
+		groups, cursor := this.RotateGroups()
+		go func() {
+			for id, group := range groups {
+				if id == "" {
+					l := NewLooper(cursor, len(group))
+					for l.HasNext() {
+						w := group[l.Next()]
+						// do not send to self
+						if skipWire == nil || skipWire != w.wire {
+							e := <-w.wire.Send(msg)
+							if e == nil {
+								err = nil
+							}
+						}
+					}
+				} else {
+					go func(ws []*Wired) {
+						size := len(ws)
+						l := NewLooper(cursor%size, size)
+						for l.HasNext() {
+							w := ws[l.Next()]
+							// do not send to self
+							if skipWire == nil || skipWire != w.wire {
+								e := <-w.wire.Send(msg)
+								// send only to one.
+								// stop if there was a success.
+								if e == nil {
+									err = nil
+									break
+								}
+							}
+						}
+					}(group)
+				}
+			}
+			errch <- err
+		}()
+	} else if msg.kind == REQALL {
+		var wg sync.WaitGroup
+		// we wrap the reply handler so that we can control the number o replies delivered.
+		handler := msg.handler
+		msg.handler = func(ctx Response) {
+			// since the end mark will be passed to the caller when ALL replies from ALL repliers arrive,
+			// the handler must be called only if it is not a end marker.
+			// It is also necessary to adjust the kind so that a last kind (REQ, ERR) is not passed.
+			if !ctx.EndMark() {
+				kind := ctx.Kind
+				if ctx.Kind == REP {
+					ctx.Kind = REP_PARTIAL
+				} else if ctx.Kind == ERR {
+					ctx.Kind = ERR_PARTIAL
+				}
+				if handler != nil {
+					handler(ctx)
+				}
+				// resets the kind
+				ctx.Kind = kind
+			}
+		}
+
+		groups, cursor := this.RotateGroups()
+		for id, group := range groups {
+			if id == "" {
+				l := NewLooper(cursor, len(group))
+				for l.HasNext() {
+					w := group[l.Next()]
+					// do not send to self
+					if skipWire == nil || skipWire != w.wire {
+						// increment reply counter
+						wg.Add(1)
+						ch := w.wire.Send(msg)
+						go func() {
+							// waits for the request completion
+							e := <-ch
+							if e == nil {
+								err = nil // at least one got through
+							} else {
+								logger.Infof("< %s", e)
+							}
+							wg.Done()
+						}()
+					}
+				}
+			} else {
+				// increment reply counter
+				wg.Add(1)
+				l := NewLooper(cursor, len(group))
+				go func() {
+					for l.HasNext() {
+						w := group[l.Next()]
+						// do not send to self
+						if skipWire == nil || skipWire != w.wire {
+							// waits for the request completion
+							e := <-w.wire.Send(msg)
+							if e == nil {
+								err = nil // at least one got through
+								wg.Done()
+								return
+							}
+						}
+					}
+					// if it got here none was successful
+					wg.Done()
+				}()
+			}
+		}
+		go func() {
+			// Wait for all requests to complete.
+			wg.Wait()
+			logger.Debugf("< all requests finnished")
+			// pass the end mark
+			if handler != nil {
+				handler(NewResponse(skipWire, nil, ACK, 0, nil))
+			}
+			errch <- err
+		}()
+	}
+
+	return errch
+}
+
 type Server struct {
 	ClientServer
+	*Wires
 
 	listener net.Listener
-	Wires    *Wires
 }
 
 func NewServer() *Server {
 	server := new(Server)
-	server.Wires = NewWires()
-	server.codec = JsonCodec{}
+	server.Wires = NewWires(JsonCodec{})
 	server.timeout = time.Second * 20
 	server.handlers = make(map[string]func(ctx *Request))
 	return server
 }
 
-func (this *Server) SetCodec(codec Codec) *Server {
-	this.codec = codec
-	return this
+// BindAddress returns the listener address
+func (this *Server) BindPort() int {
+	if this.listener != nil {
+		return this.listener.Addr().(*net.TCPAddr).Port
+	}
+	return 0
 }
 
 func (this *Server) Listen(service string) error {
@@ -1570,11 +1782,11 @@ func (this *Server) Listen(service string) error {
 			}
 			logger.Infof("< accepted connection from %s", c.RemoteAddr())
 
-			wire := NewWire(this.codec)
+			wire := NewWire(this.Codec)
 			wire.findHandler = this.findHandler
 
 			// topic exchange
-			group, remoteTopics, err := this.handshake(c, this.codec)
+			group, remoteTopics, err := this.handshake(c, this.Codec)
 
 			if err != nil {
 				c.Close()
@@ -1671,6 +1883,7 @@ func findHandler(name string, handlers map[string]func(ctx *Request)) func(c *Re
 	return nil
 }
 
+// Destroy closes all connections and the listener
 func (this *Server) Destroy() {
 	this.Wires.Destroy()
 	if this.listener != nil {
@@ -1678,195 +1891,19 @@ func (this *Server) Destroy() {
 	}
 }
 
-// sends a message and waits for the reply
-// If the type of the payload is *mybus.Msg it will ignore encoding and use the internal bytes as the payload. This is useful if we want to implement a broker.
-func (this *Server) Request(name string, payload interface{}, handler interface{}) <-chan error {
-	return this.Send(REQ, name, payload, handler, this.timeout)
-}
-
-// Requests messages to all connected clients. If a client is not connected it is forever lost.
-func (this *Server) RequestAll(name string, payload interface{}, handler interface{}, timeout time.Duration) <-chan error {
-	return this.Send(REQALL, name, payload, handler, timeout)
-}
-
-// sends a message and receive an acknowledge
-// If the type of the payload is *mybus.Msg
-// it will ignore encoding and use the internal bytes as the payload.
-func (this *Server) Push(name string, payload interface{}) <-chan error {
-	return this.Send(PUSH, name, payload, nil, time.Second)
-}
-
-// sends a message without any reply
-// If the type of the payload is *mybus.Msg
-// it will ignore encoding and use the internal bytes as the payload.
-func (this *Server) Publish(name string, payload interface{}) <-chan error {
-	return this.Send(PUB, name, payload, nil, time.Second)
-}
-
-// When the payload is of type []byte it passes the raw bytes without encoding.
-// When the payload is of type mybus.Msg it passes the FRAMED raw bytes without encoding.
-func (this *Server) Send(kind EKind, name string, payload interface{}, handler interface{}, timeout time.Duration) <-chan error {
-	return this.send(nil, kind, name, payload, handler, timeout)
-}
-
-func (this *Server) send(wire *Wire, kind EKind, name string, payload interface{}, handler interface{}, timeout time.Duration) <-chan error {
-	msg, err := this.createEnvelope(kind, name, payload, handler, timeout)
-	errch := make(chan error, 1)
-	if err != nil {
-		errch <- err
-		return errch
-	}
-
-	err = UNKNOWNTOPIC
-	if msg.kind == PUSH || msg.kind == REQ {
-		go func() {
-			ws, cursor := this.Wires.Rotate()
-			l := NewLooper(cursor, len(ws))
-			for l.HasNext() {
-				w := ws[l.Next()]
-				// does not send to self
-				if wire == nil || wire != w.wire {
-					// REQ can also receive multiple messages from ONE replier
-					err = <-w.wire.Send(msg)
-					// exit on success
-					if err == nil {
-						break
-					}
-				}
-			}
-			errch <- err
-		}()
-	} else if msg.kind == PUB {
-		// collects wires into groups. They will be called last.
-		groups, cursor := this.Wires.RotateGroups()
-		go func() {
-			for id, group := range groups {
-				if id == "" {
-					l := NewLooper(cursor, len(group))
-					for l.HasNext() {
-						w := group[l.Next()]
-						// do not send to self
-						if wire == nil || wire != w.wire {
-							e := <-w.wire.Send(msg)
-							if e == nil {
-								err = nil
-							}
-						}
-					}
-				} else {
-					go func(ws []*Wired) {
-						size := len(ws)
-						l := NewLooper(cursor%size, size)
-						for l.HasNext() {
-							w := ws[l.Next()]
-							// do not send to self
-							if wire == nil || wire != w.wire {
-								e := <-w.wire.Send(msg)
-								// send only to one.
-								// stop if there was a success.
-								if e == nil {
-									err = nil
-									break
-								}
-							}
-						}
-					}(group)
-				}
-			}
-			errch <- err
-		}()
-	} else if msg.kind == REQALL {
-		var wg sync.WaitGroup
-		// we wrap the reply handler so that we can control the number o replies delivered.
-		handler := msg.handler
-		msg.handler = func(ctx Response) {
-			// since the end mark will be passed to the caller when ALL replies from ALL repliers arrive,
-			// the handler must be called only if it is not a end marker.
-			// It is also necessary to adjust the kind so that a last kind (REQ, ERR) is not passed.
-			if !ctx.EndMark() {
-				kind := ctx.Kind
-				if ctx.Kind == REP {
-					ctx.Kind = REP_PARTIAL
-				} else if ctx.Kind == ERR {
-					ctx.Kind = ERR_PARTIAL
-				}
-				handler(ctx)
-				// resets the kind
-				ctx.Kind = kind
-			}
-		}
-
-		groups, cursor := this.Wires.RotateGroups()
-		for id, group := range groups {
-			if id == "" {
-				l := NewLooper(cursor, len(group))
-				for l.HasNext() {
-					w := group[l.Next()]
-					// do not send to self
-					if wire == nil || wire != w.wire {
-						// increment reply counter
-						wg.Add(1)
-						ch := w.wire.Send(msg)
-						go func() {
-							// waits for the request completion
-							e := <-ch
-							if e == nil {
-								err = nil // at least one got through
-							} else {
-								logger.Infof("< %s", e)
-							}
-							wg.Done()
-						}()
-					}
-				}
-			} else {
-				// increment reply counter
-				wg.Add(1)
-				l := NewLooper(cursor, len(group))
-				go func() {
-					for l.HasNext() {
-						w := group[l.Next()]
-						// do not send to self
-						if wire == nil || wire != w.wire {
-							// waits for the request completion
-							e := <-w.wire.Send(msg)
-							if e == nil {
-								err = nil // at least one got through
-								wg.Done()
-								return
-							}
-						}
-					}
-					// if it got here none was successful
-					wg.Done()
-				}()
-			}
-		}
-		go func() {
-			// Wait for all requests to complete.
-			wg.Wait()
-			logger.Debugf("< all requests finnished")
-			// pass the end mark
-			handler(NewResponse(wire, nil, ACK, 0, nil))
-			errch <- err
-		}()
-	}
-
-	return errch
-}
-
+// Handle defines the function that will handle messages for a topic.
 // name can have an '*' at the end, meaning that it will handle messages
-// with the destiny name starting with the reply name (whitout the '*'9.
+// with the destiny name starting with the reply name (whitout the '*').
 // When handling request messages, the function handler can have a return value and/or an error.
 // When handling publish/push messages, any return from the function handler is discarded.
 func (this *Server) Handle(name string, fun interface{}) {
-	handler := createRequestHandler(this.codec, fun)
+	handler := createRequestHandler(this.Codec, fun)
 
 	this.muhnd.Lock()
 	this.handlers[name] = handler
 	this.muhnd.Unlock()
 
-	msg, _ := this.createEnvelope(SUB, name, nil, nil, this.timeout)
+	msg, _ := createEnvelope(SUB, name, nil, nil, this.timeout, this.Codec)
 	ws, cursor := this.Wires.GetAll()
 	l := NewLooper(cursor, len(ws))
 	for l.HasNext() {
@@ -1889,7 +1926,7 @@ func (this *Server) Route(name string, timeout time.Duration, before func(x *Req
 		}
 
 		wire := r.wire
-		this.send(wire, r.Kind, r.Name, r.Request(), func(resp Response) {
+		this.SendSkip(wire, r.Kind, r.Name, r.Request(), func(resp Response) {
 			if after != nil {
 				// do something (ex: store the response data)
 				after(&resp)
@@ -1905,7 +1942,7 @@ func (this *Server) Cancel(name string) {
 	delete(this.handlers, name)
 	this.muhnd.Unlock()
 
-	msg, _ := this.createEnvelope(UNSUB, name, nil, nil, this.timeout)
+	msg, _ := createEnvelope(UNSUB, name, nil, nil, this.timeout, this.Codec)
 	ws, cursor := this.Wires.GetAll()
 	l := NewLooper(cursor, len(ws))
 	for l.HasNext() {

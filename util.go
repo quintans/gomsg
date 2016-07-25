@@ -3,6 +3,7 @@ package gomsg
 import (
 	"errors"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -107,4 +108,50 @@ func (this *Looper) Last() int {
 
 func (this *Looper) HasNext() bool {
 	return this.cursor < this.max
+}
+
+// Timeout is a timer over a generic element, that will call a function when a specified timeout occurs.
+// It is possible to delay the timeout.
+type Timeout struct {
+	mu       sync.RWMutex
+	what     map[interface{}]time.Time
+	ticker   *time.Ticker
+	duration time.Duration
+	handle   uint32
+}
+
+// NewTimeout create a timeout
+func NewTimeout(tick time.Duration, duration time.Duration, expired func(o interface{})) *Timeout {
+	this := new(Timeout)
+	this.what = make(map[interface{}]time.Time)
+	this.duration = duration
+	this.ticker = time.NewTicker(tick)
+	go func() {
+		for _ = range this.ticker.C {
+			this.purge(expired)
+		}
+	}()
+	return this
+}
+
+func (timeout *Timeout) purge(expired func(o interface{})) {
+	timeout.mu.Lock()
+	defer timeout.mu.Unlock()
+
+	now := time.Now()
+	for k, v := range timeout.what {
+		if v.Before(now) {
+			expired(k)
+			delete(timeout.what, k)
+		}
+	}
+}
+
+// Delay delays the timeout occurence.
+// If this is the first time it is called, only from now the timeout will occur.
+func (timeout *Timeout) Delay(o interface{}) {
+	timeout.mu.Lock()
+	defer timeout.mu.Unlock()
+
+	timeout.what[o] = time.Now().Add(timeout.duration)
 }

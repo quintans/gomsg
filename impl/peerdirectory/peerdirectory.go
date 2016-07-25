@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/quintans/gomsg"
 )
@@ -14,12 +15,13 @@ type Directory struct {
 	server *gomsg.Server
 }
 
-// creates a directory service where all the clients connect to know about their peers
+// NewDirectory creates a peer directory where all the clients connect to know about their peers
 func NewDirectory(addr string, codec gomsg.Codec) *Directory {
 	dir := &Directory{
 		peers: make(map[net.Conn]string),
 	}
-	dir.server = gomsg.NewServer().SetCodec(codec)
+	dir.server = gomsg.NewServer()
+	dir.server.SetCodec(codec)
 	dir.server.OnClose = func(c net.Conn) {
 		// this will be called if a peer stops pinging
 		fmt.Println("< Dir: peer", c.RemoteAddr(), "exited")
@@ -152,10 +154,13 @@ func NewPeer(dirAddr string, bindAddr string, codec gomsg.Codec) *Peer {
 		codec: codec,
 		peers: NewPeers(),
 	}
-	this.local = gomsg.NewServer().SetCodec(codec)
+	this.local = gomsg.NewServer()
+	this.local.SetTimeout(time.Second)
+	this.local.SetCodec(codec)
 	this.local.Listen(bindAddr)
 
 	this.dir = gomsg.NewClient().SetCodec(codec)
+	this.dir.SetTimeout(time.Second)
 	this.dir.OnConnect = func(w *gomsg.Wired) {
 		this.dir.Handle("NEW", func(peerAddr string) {
 			if peerAddr != this.self {

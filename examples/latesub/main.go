@@ -10,7 +10,8 @@ import (
 func main() {
 	server := gomsg.NewServer()
 	server.Listen(":7777")
-	cli := gomsg.NewClient().Connect("localhost:7777")
+	cli := gomsg.NewClient()
+	cli.Connect("localhost:7777")
 
 	// this late server handler must propagate to the client
 	server.Handle("XPTO", func(m string) {

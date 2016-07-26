@@ -19,7 +19,7 @@ func main() {
 		fmt.Println("<=== [0] processing:", m)
 		ungrouped++
 	})
-	cli.Connect("localhost:7777")
+	<-cli.Connect("localhost:7777")
 
 	group1 := 0
 	// Group HA subscriber
@@ -29,7 +29,7 @@ func main() {
 		fmt.Println("<=== [1] processing:", m)
 		group1++
 	})
-	cli1.Connect("localhost:7777")
+	<-cli1.Connect("localhost:7777")
 
 	// Group HA subscriber
 	group2 := 0
@@ -39,22 +39,25 @@ func main() {
 		fmt.Println("<=== [2] processing:", m)
 		group2++
 	})
-	cli2.Connect("localhost:7777")
+	<-cli2.Connect("localhost:7777")
 
 	// publisher
 	cli3 := gomsg.NewClient()
-	cli3.Connect("localhost:7777")
+	<-cli3.Connect("localhost:7777")
 
 	// Only one element of the group HA will process each message, alternately (round robin).
 	//	cli3.Publish("HELLO", "Hello World!")
 	//	cli3.Publish("HELLO", "Olá Mundo!")
 	//	cli3.Publish("HELLO", "YESSSS!")
 	cli3.Publish("HELLO", "one")
+	wait()
 	cli3.Publish("HELLO", "two")
+	wait()
 	cli3.Publish("HELLO", "three")
+	wait()
 	cli3.Publish("HELLO", "four")
+	wait()
 
-	time.Sleep(time.Millisecond * 100)
 	if ungrouped != 4 {
 		fmt.Println("RECEIVED", ungrouped, "UNGROUPED EVENTS. EXPECTED 4.")
 	}
@@ -64,7 +67,11 @@ func main() {
 	if group2 != 2 {
 		fmt.Println("RECEIVED", group2, "GROUP EVENTS. EXPECTED 2.")
 	}
-	time.Sleep(time.Millisecond * 100)
+	wait()
 	cli.Destroy()
-	time.Sleep(time.Millisecond * 100)
+	wait()
+}
+
+func wait() {
+	time.Sleep(time.Millisecond * 10)
 }

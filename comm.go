@@ -194,7 +194,11 @@ type Request struct {
 	request   []byte
 	writer    *bytes.Buffer
 	terminate bool
-	noreply   bool
+
+	// If an handler doesn't define a return type (error, whatever) and define an input of
+	// type gomsg.Request the reply will not be sent until we call gomsg.Request.SendAs().
+	// This is used to route messages (comm.Route) from server to server
+	deferReply bool
 }
 
 //var _ IRequest = &Request{}
@@ -698,13 +702,13 @@ func (this *Wire) runHandler() {
 			var reply []byte
 			var err error
 			handler := this.findHandler(msg.name)
-			var noreply bool
+			var deferReply bool
 			var terminate bool
 			if handler != nil {
 				ctx := NewRequest(this, c, msg)
 				handler(ctx) // this resets payload
 				terminate = ctx.terminate
-				noreply = ctx.noreply
+				deferReply = ctx.deferReply
 				if ctx.Fault() != nil {
 					err = ctx.Fault() // single fault
 				} else {
@@ -717,7 +721,7 @@ func (this *Wire) runHandler() {
 			// only sends a reply if there was some kind of return action
 			if terminate {
 				this.reply(ACK, msg.sequence, nil)
-			} else if !noreply {
+			} else if !deferReply {
 				if err != nil {
 					msg.kind = ERR
 					if this.codec != nil {
@@ -841,7 +845,7 @@ func createRequestHandler(codec Codec, fun interface{}) func(ctx *Request) {
 	} else if size > 1 {
 		t := typ.In(0)
 		if t != requestType {
-			panic("Invalid function. In a two paramater function the first must be the mybus.IRequest.")
+			panic("Invalid function. In a two paramater function the first must be the gomsg.Request.")
 		}
 	}
 
@@ -918,8 +922,10 @@ func createRequestHandler(codec Codec, fun interface{}) func(ctx *Request) {
 			} else {
 				ctx.SetReply(result)
 			}
-		} else {
-			ctx.noreply = true
+		} else if hasContext {
+			// only if the handler has an input of type gomsg.Request we can defer the reply,
+			// because only with gomsg.Request.SendAs() we can reply
+			ctx.deferReply = true
 		}
 	}
 }
@@ -1236,6 +1242,8 @@ func (this *Client) Connection() net.Conn {
 // with the destiny name starting with the reply name whitout the '*'.
 // When handling request messages, the function handler can have a return value and/or an error.
 // When handling publish/push messages, any return from the function handler is discarded.
+// When handling Request/RequestAll messages, if a return is not specified,
+// the caller will not receive a reply until you explicitly call gomsg.Request.SendAs()
 func (this *Client) Handle(name string, fun interface{}) {
 	handler := createRequestHandler(this.wire.codec, fun)
 
@@ -1900,6 +1908,8 @@ func (this *Server) Destroy() {
 // with the destiny name starting with the reply name (whitout the '*').
 // When handling request messages, the function handler can have a return value and/or an error.
 // When handling publish/push messages, any return from the function handler is discarded.
+// When handling Request/RequestAll messages, if a return is not specified,
+// the caller will not receive a reply until you explicitly call gomsg.Request.SendAs()
 func (this *Server) Handle(name string, fun interface{}) {
 	handler := createRequestHandler(this.Codec, fun)
 

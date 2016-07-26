@@ -9,6 +9,7 @@ import (
 
 func main() {
 	server := gomsg.NewServer()
+	server.SetTimeout(time.Second)
 	server.Listen(":7777")
 
 	cli := gomsg.NewClient()
@@ -44,10 +45,10 @@ func main() {
 		}, time.Second)
 	*/
 
-	time.Sleep(time.Millisecond * 2000)
+	time.Sleep(time.Second * 2)
 	fmt.Println("I: close...")
 	cli.Destroy()
-	time.Sleep(time.Millisecond * 100)
+	time.Sleep(time.Second * 5)
 }
 
 func reverse(m string) string {

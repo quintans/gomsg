@@ -44,6 +44,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/quintans/toolkit/faults"
 	"github.com/quintans/toolkit/log"
 )
 
@@ -101,77 +102,26 @@ var (
 
 // errors
 var (
-	DROPPED      = errors.New("Message was Droped. Wire is closed or full.")
-	NOCODEC      = errors.New("No codec define")
-	UNKNOWNTOPIC = errors.New("No registered subscriber")
-	TIMEOUT      = errors.New("Timeout while waiting for reply")
-	EOR          = errors.New("End Of Multiple Reply")
-	NACKERROR    = errors.New("Not Acknowledge Error")
+	DROPPED   = errors.New("Message was Droped. Wire is closed or full.")
+	NOCODEC   = errors.New("No codec defined")
+	EOR       = errors.New("End Of Multiple Reply")
+	NACKERROR = errors.New("Not Acknowledge Error")
+
+	UNKNOWNTOPIC = "No registered subscriber for %s."
+	TIMEOUT      = "Timeout while waiting for reply of %s(%s)."
 )
 
-type SafeConn struct {
-	conn    net.Conn
-	timeout time.Duration
-}
+// Specific error types are define so that we can use type assertion, if needed
+type UnknownTopic error
+type TimeoutError error
 
-func (this SafeConn) Write(p []byte) (n int, err error) {
-	if this.timeout == time.Duration(0) {
-		this.conn.SetWriteDeadline(time.Time{})
+func timeouttime(timeout time.Duration) time.Time {
+	if timeout == time.Duration(0) {
+		return time.Time{}
 	} else {
-		this.conn.SetWriteDeadline(time.Now().Add(this.timeout))
+		return time.Now().Add(timeout)
 	}
-	return this.conn.Write(p)
 }
-
-func (this SafeConn) Read(p []byte) (n int, err error) {
-	if this.timeout == time.Duration(0) {
-		this.conn.SetReadDeadline(time.Time{})
-	} else {
-		this.conn.SetReadDeadline(time.Now().Add(this.timeout))
-	}
-	return this.conn.Read(p)
-}
-
-// ensure interface
-var _ io.Writer = &SafeConn{}
-var _ io.Reader = &SafeConn{}
-
-/*
-type IContext interface {
-	Connection() net.Conn
-	Kind() EKind
-	Name() string
-}
-
-type IResponse interface {
-	IContext
-
-	Reader() *InputStream
-	Reply() []byte
-	Fault() error
-	Last() bool    // is the last reply?
-	EndMark() bool // is this the end mark?
-}
-
-type IRequest interface {
-	IResponse
-
-	Request() []byte
-	Writer() *OutputStream
-	// sets a single reply (REQ)
-	SetReply([]byte)
-	// sets a single reply error (ERR)
-	SetFault(error)
-	// Terminates a series of replies by sending an ACK message to the caller.
-	// It can also be used to reject a request, since this terminates the request without sending a reply payload.
-	Terminate()
-	// sets a multi reply (REQ_PARTIAL)
-	SendReply([]byte)
-	// sets a multi reply error (ERR_PARTIAL)
-	SendFault(error)
-	SendAs(EKind, []byte)
-}
-*/
 
 // Context is used to pass all the data to replying function if we so wish.
 // payload contains the data for incoming messages and reply contains the reply data
@@ -454,7 +404,7 @@ func (this *Wire) asynchWaitForCallback(msg Envelope) {
 			select {
 			case <-time.After(deadline.Sub(time.Now())):
 				this.delCallback(msg.sequence)
-				msg.errch <- TIMEOUT
+				msg.errch <- TimeoutError(faults.New(TIMEOUT, msg.kind, msg.name))
 				break
 
 			case ctx := <-ch:
@@ -506,7 +456,7 @@ func (this *Wire) Send(msg Envelope) <-chan error {
 	// check first if the peer has the topic before sending.
 	// This is done because remote topics are only available after a connection
 	if test(msg.kind, PUB, PUSH, REQ, REQALL) && !this.hasRemoteTopic(msg.name) {
-		msg.errch <- UNKNOWNTOPIC
+		msg.errch <- UnknownTopic(faults.New(UNKNOWNTOPIC, msg.name))
 	} else { // SUB, UNSUB
 		msg.sequence = atomic.AddUint32(&this.sequence, 1)
 		//msg.sequence = randomSeq()
@@ -580,7 +530,9 @@ func (this *Wire) write(c net.Conn, msg Envelope) (err error) {
 		}
 	}()
 
-	buf := bufio.NewWriter(SafeConn{c, msg.timeout})
+	c.SetWriteDeadline(timeouttime(msg.timeout))
+
+	buf := bufio.NewWriter(c)
 	w := NewOutputStream(buf)
 
 	// kind
@@ -629,10 +581,12 @@ func read(r *InputStream, bname bool, bpayload bool) (name string, payload []byt
 }
 
 func (this *Wire) reader(c net.Conn) {
-	//r := NewInputStream(ConnTimeout{c, this.timeout})
 	r := NewInputStream(c)
 	var err error
 	for {
+		// we wait forever for the first read
+		c.SetReadDeadline(time.Time{})
+
 		// kind
 		var k uint8
 		k, err = r.ReadUI8()
@@ -640,6 +594,9 @@ func (this *Wire) reader(c net.Conn) {
 			break
 		}
 		var kind = EKind(k)
+
+		// after the first read we apply the timeout
+		c.SetWriteDeadline(timeouttime(this.timeout))
 
 		// sequence
 		var seq uint32
@@ -754,7 +711,7 @@ func (this *Wire) runHandler() {
 					reply = ctx.Reply() // single reply
 				}
 			} else {
-				err = UNKNOWNTOPIC
+				err = UnknownTopic(faults.New(UNKNOWNTOPIC, msg.name))
 			}
 
 			// only sends a reply if there was some kind of return action
@@ -838,7 +795,7 @@ func createReplyHandler(codec Codec, fun interface{}) func(ctx Response) {
 		}
 		ok, hasContext, payloadType, hasError = validateSigErr(params, replyType)
 		if !ok {
-			panic("Invalid function. All parameter function are optional but they must folow the signature order: func([mybus.IReply], [custom type], [error]).")
+			panic("Invalid function. All parameter function are optional but they must folow the signature order: func([gomsg.Request], [custom type], [error]).")
 		}
 	}
 
@@ -1031,7 +988,7 @@ func NewClient() *Client {
 		reconnectInterval:    time.Millisecond * 100,
 		reconnectMaxInterval: 0,
 	}
-	this.timeout = time.Second * 20
+	this.timeout = time.Second * 10
 	this.handlers = make(map[string]func(ctx *Request))
 
 	this.wire.findHandler = func(name string) func(ctx *Request) {
@@ -1105,14 +1062,14 @@ func serializeHanshake(c net.Conn, codec Codec, timeout time.Duration, payload [
 	if codec != nil {
 		data, err = codec.Encode(payload)
 		if err != nil {
-			return err
+			return faults.Wrap(err)
 		}
 	} else {
 		var buf = new(bytes.Buffer)
 		os := NewOutputStream(buf)
 		os.WriteUI16(uint16(len(payload)))
 		if err != nil {
-			return err
+			return faults.Wrap(err)
 		}
 		for _, v := range payload {
 			os.WriteString(v)
@@ -1120,7 +1077,9 @@ func serializeHanshake(c net.Conn, codec Codec, timeout time.Duration, payload [
 		data = buf.Bytes()
 	}
 
-	buf := bufio.NewWriter(SafeConn{c, timeout})
+	c.SetWriteDeadline(timeouttime(timeout))
+
+	buf := bufio.NewWriter(c)
 	w := NewOutputStream(buf)
 	err = w.WriteBytes(data)
 	if err != nil {
@@ -1130,10 +1089,12 @@ func serializeHanshake(c net.Conn, codec Codec, timeout time.Duration, payload [
 }
 
 func deserializeHandshake(c net.Conn, codec Codec, timeout time.Duration, isFromClient bool) (string, map[string]bool, error) {
-	r := NewInputStream(SafeConn{c, timeout})
+	c.SetReadDeadline(timeouttime(timeout))
+
+	r := NewInputStream(c)
 	data, err := r.ReadBytes()
 	if err != nil {
-		return "", nil, err
+		return "", nil, faults.Wrap(err)
 	}
 	var topics []string
 	if codec != nil {
@@ -1143,14 +1104,14 @@ func deserializeHandshake(c net.Conn, codec Codec, timeout time.Duration, isFrom
 		is := NewInputStream(buf)
 		size, err := is.ReadUI16()
 		if err != nil {
-			return "", nil, err
+			return "", nil, faults.Wrap(err)
 		}
 		topics = make([]string, size)
 		var length = int(size)
 		for i := 0; i < length; i++ {
 			topics[i], err = is.ReadString()
 			if err != nil {
-				return "", nil, err
+				return "", nil, faults.Wrap(err)
 			}
 		}
 	}
@@ -1231,9 +1192,9 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 	// gets the connection
 	c, err := net.DialTimeout("tcp", this.addr, time.Second)
 	if err != nil {
-		logger.Infof("> failed to connect to %s", this.addr)
+		logger.Infof("> [dial] failed to connect to %s", this.addr)
 		if retry > 0 {
-			logger.Infof("> retry in %v", retry)
+			logger.Infof("> [dial] retry in %v", retry)
 			go func() {
 				time.Sleep(retry)
 				if this.reconnectMaxInterval > 0 && retry < this.reconnectMaxInterval {
@@ -1242,16 +1203,16 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 				this.dial(retry, cherr)
 			}()
 		} else {
-			logger.Infof("> NO retry will be performed!")
+			logger.Infof("> [dial] NO retry will be performed!")
 		}
 		return
 	}
 
-	logger.Infof("> connected to %s with %s", this.addr, c.LocalAddr())
+	logger.Infof("> [dial] connected to %s with %s", this.addr, c.LocalAddr())
 	// topic exchange
 	err = this.handshake(c)
 	if err != nil {
-		logger.Errorf("> %s", err)
+		logger.Errorf("> [dial] %s", err)
 		c.Close()
 	} else {
 		go this.wire.writer(c)
@@ -1389,19 +1350,47 @@ func (this *Wired) Wire() *Wire {
 // This means that we only need to call one of them.
 // The other nodes function as High Availability and load balancing nodes
 type Wires struct {
-	mu     sync.RWMutex
-	wires  []*Wired
-	groups map[string][]*Wired
-	cursor int
-	Codec  Codec
+	mu              sync.RWMutex
+	wires           []*Wired
+	groups          map[string][]*Wired
+	cursor          int
+	Codec           Codec
+	onSendListeners map[*SendListener]bool
+}
+
+type SendListener func(event SendEvent)
+
+type SendEvent struct {
+	Kind    EKind
+	Name    string
+	Payload interface{}
+	Handler interface{}
+}
+
+// AddSendListener adds a listener on send messages (Publis/Push/RequestAll/Request)
+func (this *Wires) AddSendListener(listener SendListener) *SendListener {
+	this.onSendListeners[&listener] = true
+	return &listener
+}
+
+// RemoveSendListener removes a previously added listener on send messages
+func (this *Wires) RemoveSendListener(listener *SendListener) {
+	delete(this.onSendListeners, listener)
+}
+
+func (this *Wires) fireSendListener(event SendEvent) {
+	for listener := range this.onSendListeners {
+		(*listener)(event)
+	}
 }
 
 // NewWires creates a Wires structure
 func NewWires(codec Codec) *Wires {
 	return &Wires{
-		wires:  make([]*Wired, 0),
-		groups: make(map[string][]*Wired),
-		Codec:  codec,
+		wires:           make([]*Wired, 0),
+		groups:          make(map[string][]*Wired),
+		Codec:           codec,
+		onSendListeners: make(map[*SendListener]bool),
 	}
 }
 
@@ -1556,6 +1545,12 @@ func (this *Wires) RotateGroups() (map[string][]*Wired, int) {
 	return newMap, c
 }
 
+func (this *Wires) Size() int {
+	this.mu.RLock()
+	defer this.mu.RUnlock()
+	return len(this.wires)
+}
+
 // Request sends a message and waits for the reply
 // If the type of the payload is *mybus.Msg it will ignore encoding and use the internal bytes as the payload. This is useful if we want to implement a broker.
 func (this *Wires) Request(name string, payload interface{}, handler interface{}) <-chan error {
@@ -1597,7 +1592,15 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 		return errch
 	}
 
-	err = UNKNOWNTOPIC
+	// fires all registered listeners
+	this.fireSendListener(SendEvent{
+		Kind:    kind,
+		Name:    name,
+		Payload: payload,
+		Handler: handler,
+	})
+
+	err = UnknownTopic(faults.New(UNKNOWNTOPIC, msg.name))
 	if msg.kind == PUSH || msg.kind == REQ {
 		go func() {
 			ws, cursor := this.Rotate()
@@ -1695,7 +1698,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 							if e == nil {
 								err = nil // at least one got through
 							} else {
-								logger.Infof("< %s", e)
+								logger.Infof("< [SendSkip] %s", e)
 							}
 							wg.Done()
 						}()
@@ -1727,7 +1730,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 		go func() {
 			// Wait for all requests to complete.
 			wg.Wait()
-			logger.Debugf("< all requests finnished")
+			logger.Debugf("< [SendSkip] all requests finnished")
 			// pass the end mark
 			if handler != nil {
 				handler(NewResponse(skipWire, nil, ACK, 0, nil))
@@ -1749,7 +1752,7 @@ type Server struct {
 func NewServer() *Server {
 	server := new(Server)
 	server.Wires = NewWires(JsonCodec{})
-	server.timeout = time.Second * 20
+	server.timeout = time.Second * 10
 	server.handlers = make(map[string]func(ctx *Request))
 	return server
 }
@@ -1769,7 +1772,7 @@ func (this *Server) Listen(service string) error {
 		return err
 	}
 	this.listener = l
-	logger.Debugf("< listening at %s", l.Addr())
+	logger.Debugf("< [Listen] listening at %s", l.Addr())
 	go func() {
 		for {
 			// notice that c is changed in the disconnect function
@@ -1777,10 +1780,10 @@ func (this *Server) Listen(service string) error {
 			if err != nil {
 				// happens when the listener is closed
 				//logger.Infof("< accepting no more due to error: %s", err)
-				logger.Infof("< Stoped listening at %s", l.Addr())
+				logger.Infof("< [Listen] Stoped listening at %s", l.Addr())
 				return
 			}
-			logger.Infof("< accepted connection from %s", c.RemoteAddr())
+			logger.Infof("< [Listen] accepted connection from %s", c.RemoteAddr())
 
 			wire := NewWire(this.Codec)
 			wire.findHandler = this.findHandler
@@ -1790,6 +1793,7 @@ func (this *Server) Listen(service string) error {
 
 			if err != nil {
 				c.Close()
+				logger.Errorf("< Failed to handshake: %s", err)
 			} else {
 				wire.groupId = group
 				wire.remoteTopics = remoteTopics
@@ -1799,10 +1803,10 @@ func (this *Server) Listen(service string) error {
 
 					if c != nil {
 						// handle errors during a connection
-						if e == io.EOF {
-							logger.Infof("< client %s closed connection", c.RemoteAddr())
+						if faults.Has(e, io.EOF) {
+							logger.Infof("< [Listen] client %s closed connection", c.RemoteAddr())
 						} else if e != nil {
-							logger.Errorf("< %s", e)
+							logger.Errorf("< [Listen] %s", faults.Wrap(e))
 						}
 
 						this.Wires.Kill(c)

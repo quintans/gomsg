@@ -1217,7 +1217,7 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 		return
 	}
 
-	logger.Debugf("> [dial] %p connected to %s with %s", this, this.addr, c.LocalAddr())
+	logger.Debugf("> [dial] connected to %s with %s", this.addr, c.LocalAddr())
 
 	// topic exchange
 	err = this.handshake(c)

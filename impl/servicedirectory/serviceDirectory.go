@@ -1,4 +1,15 @@
-package impl
+// THIS IS A WORK IN PROGRESS
+//
+// This file demonstrates the use o gomsg to build a netwok of services.
+// We have peer nodes and directory nodes.
+// Peer are nodes that provide and/or consume services.
+// Data communication is made directly between peer nodes.
+// Directory nodes (one or more) is where the peers register the services that they provide.
+// (This network could operate with just one directory node. If this node disapears the network still functions)
+// Everytime a peer changes (add/remove) its provided services it informs the directory
+// and this in turn notifies all other perrs of this change.
+
+package servicedirectory
 
 import (
 	"fmt"
@@ -151,8 +162,8 @@ func (dir *ServiceDirectory) Listen(addr string) error {
 	// keep alive
 	var timeout = gomsg.NewTimeout(dir.PingInterval, dir.PingInterval*time.Duration(dir.PingFailures), func(o interface{}) {
 		c := o.(net.Conn)
-		var p = dir.providers[c]
-		fmt.Println("I: < Dir: Ping timeout. Purging/killing connection from", c.RemoteAddr(), "(", p.Endpoint, ")")
+
+		fmt.Println("I: < Dir: Ping timeout. Purging/killing connection from", c.RemoteAddr())
 		dir.server.Kill(c)
 	})
 	dir.server.OnConnect = func(w *gomsg.Wired) {
@@ -162,9 +173,6 @@ func (dir *ServiceDirectory) Listen(addr string) error {
 	// reply to pings and delays the timeout
 	dir.server.Handle(PING, func(r *gomsg.Request) string {
 		timeout.Delay(r.Connection())
-
-		// DELETE THIS
-		time.Sleep(time.Second * 5)
 
 		return PONG
 	})
@@ -331,7 +339,6 @@ func (node *Node) Connect(bindAddr string, dirAddrs ...string) error {
 					if dir.Active() {
 						var pong = ""
 						var err = <-dir.RequestTimeout(PING, nil, func(ctx gomsg.Response, reply string) {
-							fmt.Println("D: > Received", reply)
 							pong = reply
 						}, time.Millisecond*10)
 

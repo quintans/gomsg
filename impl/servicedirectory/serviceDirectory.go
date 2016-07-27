@@ -72,22 +72,44 @@ func NewServiceDirectory(codec gomsg.Codec) *ServiceDirectory {
 		}
 	}
 	// returns a list of endpoints (addresses) by service
-	dir.server.Handle(S_ADDSERVICE, func(r *gomsg.Request, service string) {
+	dir.server.Handle(S_ADDSERVICE, func(r *gomsg.Request, service string) error {
 		var c = r.Connection()
-		var endpoint = fmt.Sprintf("%s:%s", c.RemoteAddr().(*net.TCPAddr).IP, service)
-
-		fmt.Println("I: < Dir: S_ADDSERVICE service", endpoint, "->", service)
 		dir.mu.Lock()
 		var provider = dir.providers[c]
 		if provider != nil {
+			fmt.Println("I: < Dir: S_ADDSERVICE service", provider.Endpoint, "->", service)
 			provider.AddService(service)
 		}
 		dir.mu.Unlock()
 
-		var w = dir.server.Get(c)
-		// notifies all nodes, but caller
-		dir.server.SendSkip(w.Wire(), gomsg.REQALL, C_ADDSERVICE, service, nil, time.Second)
+		if provider != nil {
+			var w = dir.server.Get(c)
+			// notifies all nodes, but caller
+			dir.server.SendSkip(w.Wire(), gomsg.REQALL, C_ADDSERVICE, Service{provider.Endpoint, service}, nil, time.Second)
+		}
+
+		return nil
 	})
+
+	dir.server.Handle(S_CANCELSERVICE, func(r *gomsg.Request, service string) error {
+		var c = r.Connection()
+		dir.mu.Lock()
+		var provider = dir.providers[c]
+		if provider != nil {
+			fmt.Println("I: < Dir: S_CANCELSERVICE service", provider.Endpoint, "->", service)
+			provider.RemoveService(service)
+		}
+		dir.mu.Unlock()
+
+		if provider != nil {
+			var w = dir.server.Get(c)
+			// notifies all nodes, but caller
+			dir.server.SendSkip(w.Wire(), gomsg.REQALL, C_CANCELSERVICE, Service{provider.Endpoint, service}, nil, time.Second)
+		}
+
+		return nil
+	})
+
 	dir.server.Handle(S_PEERREADY, func(r *gomsg.Request, provider Provider) []*Provider {
 		var c = r.Connection()
 		fmt.Println("< Dir: peer", c.RemoteAddr(), " S_PEERREADY:", provider)
@@ -125,24 +147,27 @@ func (dir *ServiceDirectory) Listen(addr string) error {
 	if err != nil {
 		return err
 	}
-	/*
-		// keep alive
-		var timeout = gomsg.NewTimeout(dir.PingInterval, dir.PingInterval*time.Duration(dir.PingFailures), func(o interface{}) {
-			c := o.(net.Conn)
-			var p = dir.providers[c]
-			fmt.Println("I: < Dir: Ping timeout. Purging/killing connection from", c.RemoteAddr(), "(", p.Endpoint, ")")
-			dir.server.Kill(c)
-		})
-		dir.server.OnConnect = func(w *gomsg.Wired) {
-			// starts monitoring
-			timeout.Delay(w.Conn())
-		}
-		// reply to pings and delays the timeout
-		dir.server.Handle(PING, func(r *gomsg.Request) string {
-			timeout.Delay(r.Connection())
-			return PONG
-		})
-	*/
+
+	// keep alive
+	var timeout = gomsg.NewTimeout(dir.PingInterval, dir.PingInterval*time.Duration(dir.PingFailures), func(o interface{}) {
+		c := o.(net.Conn)
+		var p = dir.providers[c]
+		fmt.Println("I: < Dir: Ping timeout. Purging/killing connection from", c.RemoteAddr(), "(", p.Endpoint, ")")
+		dir.server.Kill(c)
+	})
+	dir.server.OnConnect = func(w *gomsg.Wired) {
+		// starts monitoring
+		timeout.Delay(w.Conn())
+	}
+	// reply to pings and delays the timeout
+	dir.server.Handle(PING, func(r *gomsg.Request) string {
+		timeout.Delay(r.Connection())
+
+		// DELETE THIS
+		time.Sleep(time.Second * 5)
+
+		return PONG
+	})
 
 	return nil
 }
@@ -153,12 +178,12 @@ type Provider struct {
 	Services []string
 }
 
-func NewProvider(endpoint string) Provider {
-	return Provider{endpoint, make([]string, 0)}
+func NewProvider(endpoint string) *Provider {
+	return &Provider{endpoint, make([]string, 0)}
 }
 
 // Contains verifies if the Provider has a service
-func (p Provider) Find(service string) int {
+func (p *Provider) Find(service string) int {
 	if len(p.Services) > 0 {
 		for k, v := range p.Services {
 			if v == service {
@@ -171,14 +196,14 @@ func (p Provider) Find(service string) int {
 }
 
 // AddService adds a service to the service list if it does not exists
-func (p Provider) AddService(service string) {
+func (p *Provider) AddService(service string) {
 	if p.Find(service) == -1 {
 		p.Services = append(p.Services, service)
 	}
 }
 
 // RemoveService removes a service from the service list and returns if the endpoint has no services
-func (p Provider) RemoveService(service string) bool {
+func (p *Provider) RemoveService(service string) bool {
 	if k := p.Find(service); k > -1 {
 		p.Services = append(p.Services[:k], p.Services[k+1:]...)
 		return len(p.Services) == 0
@@ -202,8 +227,8 @@ type Node struct {
 	mu         sync.RWMutex
 	peers      map[string]*gomsg.Client
 	muServers  sync.RWMutex
-	providers  map[string]Provider // list of all available service providers, by endpoint
-	provides   map[string]bool     // the services that this node provides
+	providers  map[string]*Provider // list of all available service providers, by endpoint
+	provides   map[string]bool      // the services that this node provides
 	// PingInterval is the interval to between peer pings
 	PingInterval time.Duration
 	// PingFailures is the number of times a ping can fail before the peer is considered offline
@@ -220,7 +245,7 @@ func NewNode() *Node {
 		PingInterval: time.Second,
 		PingFailures: 2,
 		provides:     make(map[string]bool),
-		providers:    make(map[string]Provider),
+		providers:    make(map[string]*Provider),
 	}
 	node.local = gomsg.NewServer()
 	node.AddSendListener(func(event gomsg.SendEvent) {
@@ -253,7 +278,7 @@ func (node *Node) Connect(bindAddr string, dirAddrs ...string) error {
 			fmt.Println("I: > node:", bindAddr, "C_PEERREADY notified of a new peer:", provider)
 
 			node.mu.Lock()
-			node.providers[provider.Endpoint] = provider
+			node.providers[provider.Endpoint] = &provider
 			node.mu.Unlock()
 		})
 		dir.Handle(C_ADDSERVICE, func(service Service) {
@@ -296,31 +321,35 @@ func (node *Node) Connect(bindAddr string, dirAddrs ...string) error {
 		})
 
 		dir.OnConnect = func(w *gomsg.Wired) {
-			/*
-				// this will ping the service directory,
-				// and if there is no reply after some attempts it will disconnect
-				go func(conn net.Conn) {
-					var ticker = time.NewTicker(node.PingInterval)
-					var retries = node.PingFailures
-					for _ = range ticker.C {
-						if dir.Active() {
-							<-dir.RequestTimeout(PING, nil, func(ctx gomsg.Response, reply string) {
-								if reply != PONG {
-									if retries == 0 {
-										ticker.Stop()
-									}
-									retries--
-								} else {
-									retries = node.PingFailures
-								}
-							}, time.Millisecond*100)
+
+			// this will ping the service directory,
+			// and if there is no reply after some attempts it will reconnect
+			go func() {
+				var ticker = time.NewTicker(node.PingInterval)
+				var retries = node.PingFailures
+				for _ = range ticker.C {
+					if dir.Active() {
+						var pong = ""
+						var err = <-dir.RequestTimeout(PING, nil, func(ctx gomsg.Response, reply string) {
+							fmt.Println("D: > Received", reply)
+							pong = reply
+						}, time.Millisecond*10)
+
+						if _, ok := err.(gomsg.TimeoutError); ok || pong != PONG {
+							retries--
+							fmt.Println("D: > PING failed. retries left:", retries)
+							if retries == 0 {
+								ticker.Stop()
+							}
 						} else {
-							ticker.Stop()
+							retries = node.PingFailures
 						}
-						dir.Reconnect()
+					} else {
+						ticker.Stop()
 					}
-				}(w.Conn())
-			*/
+				}
+				dir.Reconnect()
+			}()
 
 			node.dirs.Put(w.Conn(), w.Wire())
 
@@ -346,7 +375,7 @@ func (node *Node) Connect(bindAddr string, dirAddrs ...string) error {
 				defer node.mu.Unlock()
 
 				for _, v := range providers {
-					node.providers[v.Endpoint] = v
+					node.providers[v.Endpoint] = &v
 				}
 			})
 		}
@@ -371,7 +400,6 @@ func (node *Node) connectPeer(peerAddr string) error {
 	defer node.mu.Unlock()
 
 	if node.peers[peerAddr] == nil {
-		fmt.Println("I: > new peer at", peerAddr)
 		cli := gomsg.NewClient().SetCodec(node.Codec)
 
 		cli.OnConnect = func(w *gomsg.Wired) {
@@ -450,7 +478,7 @@ func (node *Node) Destroy() {
 	}
 
 	node.dirs.Destroy()
-	node.Destroy()
+	node.Wires.Destroy()
 
 	node.remoteDirs = nil
 	node.local = nil
@@ -464,12 +492,11 @@ func (node *Node) lazyConnect(topic string) {
 	// find unconnected peers for this topic
 	var unconnected = make([]string, 0)
 	for _, provider := range node.providers {
-		for _, service := range provider.Services {
-			if service == topic {
-				var cli = node.peers[provider.Endpoint]
-				if cli == nil {
-					unconnected = append(unconnected, provider.Endpoint)
-				}
+		if provider.Find(topic) != -1 {
+			var cli = node.peers[provider.Endpoint]
+			if cli == nil {
+				fmt.Println("D: > found unconnect endpoint", provider.Endpoint, "for", topic)
+				unconnected = append(unconnected, provider.Endpoint)
 			}
 		}
 	}

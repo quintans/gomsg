@@ -331,8 +331,8 @@ type Wire struct {
 	mucb      sync.RWMutex
 	callbacks map[uint32]chan Response
 
-	disconnect  func(error)
-	findHandler func(name string) func(ctx *Request)
+	disconnected func(net.Conn, error)
+	findHandler  func(name string) func(ctx *Request)
 
 	mutop        sync.RWMutex
 	groupId      string // When it is a client wire, it is used for High Availability
@@ -524,13 +524,13 @@ func (this *Wire) writer(c net.Conn) {
 		}
 	}
 	// exit
-	this.disconnect(nil)
+	this.disconnected(c, nil)
 }
 
 func (this *Wire) write(c net.Conn, msg Envelope) (err error) {
 	defer func() {
 		if err != nil {
-			this.disconnect(err)
+			this.disconnected(c, err)
 		}
 	}()
 
@@ -688,7 +688,7 @@ func (this *Wire) reader(c net.Conn) {
 		}
 	*/
 
-	this.disconnect(err)
+	this.disconnected(c, err)
 }
 
 // Executes the function that handles the request. By default the reply of this handler is allways final (REQ or ERR).
@@ -988,6 +988,7 @@ type Client struct {
 	reconnectMaxInterval time.Duration
 }
 
+// NewClient creates a Client
 func NewClient() *Client {
 	this := &Client{
 		wire:                 NewWire(JsonCodec{}),
@@ -1004,9 +1005,30 @@ func NewClient() *Client {
 		return findHandler(name, this.handlers)
 	}
 
-	this.wire.disconnect = func(e error) {
-		//this.Disconnect()
-		this.disconnect(make(chan error, 1))
+	this.wire.disconnected = func(c net.Conn, e error) {
+		/*
+			if e != nil {
+				logger.Infof("> [wire.disconnect] error: %s", e)
+			}
+		*/
+		this.muconn.Lock()
+		defer this.muconn.Unlock()
+
+		// Since this can be called from several places at the same time (reader goroutine, Reconnect(), ),
+		// we must check if it is still the same connection
+		if this.conn == c {
+			this.conn.Close()
+			if this.OnClose != nil {
+				this.OnClose(this.conn)
+			}
+			this.conn = nil
+			if this.reconnectInterval > 0 {
+				go func(interval time.Duration) {
+					this.dial(interval, make(chan error, 1))
+				}(this.reconnectInterval)
+			}
+		}
+
 	}
 	return this
 }
@@ -1142,9 +1164,8 @@ func (this *Client) Connect(addr string) <-chan error {
 }
 
 func (this *Client) Reconnect() <-chan error {
-	var cherr = make(chan error, 1)
-	this.disconnect(cherr)
-	return cherr
+	this.Disconnect()
+	return this.Connect(this.addr)
 }
 
 func (this *Client) Disconnect() {
@@ -1157,24 +1178,6 @@ func (this *Client) Disconnect() {
 			this.OnClose(this.conn)
 		}
 		this.conn = nil
-	}
-}
-
-func (this *Client) disconnect(cherr chan error) {
-	this.muconn.Lock()
-	defer this.muconn.Unlock()
-
-	if this.conn != nil {
-		this.conn.Close()
-		if this.OnClose != nil {
-			this.OnClose(this.conn)
-		}
-		this.conn = nil
-		if this.reconnectInterval > 0 {
-			go func(interval time.Duration) {
-				this.dial(interval, cherr)
-			}(this.reconnectInterval)
-		}
 	}
 }
 
@@ -1198,9 +1201,9 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 	// gets the connection
 	c, err := net.DialTimeout("tcp", this.addr, time.Second)
 	if err != nil {
-		logger.Infof("> [dial] failed to connect to %s", this.addr)
+		logger.Debugf("> [dial] failed to connect to %s", this.addr)
 		if retry > 0 {
-			logger.Infof("> [dial] retry in %v", retry)
+			logger.Debugf("> [dial] retry in %v", retry)
 			go func() {
 				time.Sleep(retry)
 				if this.reconnectMaxInterval > 0 && retry < this.reconnectMaxInterval {
@@ -1209,12 +1212,13 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 				this.dial(retry, cherr)
 			}()
 		} else {
-			logger.Infof("> [dial] NO retry will be performed!")
+			logger.Debugf("> [dial] NO retry will be performed!")
 		}
 		return
 	}
 
-	logger.Infof("> [dial] connected to %s with %s", this.addr, c.LocalAddr())
+	logger.Debugf("> [dial] %p connected to %s with %s", this, this.addr, c.LocalAddr())
+
 	// topic exchange
 	err = this.handshake(c)
 	if err != nil {
@@ -1805,16 +1809,17 @@ func (this *Server) Listen(service string) error {
 			} else {
 				wire.groupId = group
 				wire.remoteTopics = remoteTopics
-				wire.disconnect = func(e error) {
+				wire.disconnected = func(conn net.Conn, e error) {
 					this.muconn.Lock()
 					defer this.muconn.Unlock()
 
-					if c != nil {
+					// check to see if we are disconnecting the same connection
+					if c == conn {
 						// handle errors during a connection
-						if faults.Has(e, io.EOF) {
-							logger.Infof("< [Listen] client %s closed connection", c.RemoteAddr())
+						if faults.Has(e, io.EOF) || isClosed(e){
+							logger.Infof("< [wire.disconnected] client %s closed connection", c.RemoteAddr())
 						} else if e != nil {
-							logger.Errorf("< [Listen] %s", faults.Wrap(e))
+							logger.Errorf("< [wire.disconnected] %s", faults.Wrap(e))
 						}
 
 						this.Wires.Kill(c)
@@ -2005,4 +2010,17 @@ func Route(name string, src Duplexer, dest Duplexer, relayTimeout time.Duration,
 		}, relayTimeout)
 	})
 
+}
+
+// IcClosed checks for common text messages regarding a closed connection.
+// Ugly but can't find another way :(
+func isClosed(e error) bool {
+	if e != nil {
+		var s = e.Error()
+		if strings.Contains(s, "EOF") ||
+			strings.Contains(s, "use of closed network connection") {
+			return true
+		}
+	}
+	return false
 }

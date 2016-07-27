@@ -38,15 +38,15 @@ func main() {
 		return
 	}
 	wait()
-
-	var peer2 = impl.NewNode()
-	err = peer2.Connect(":6002", "127.0.0.1:7001")
-	if err != nil {
-		fmt.Println("E:", err)
-		return
-	}
-	wait()
 	/*
+		var peer2 = impl.NewNode()
+		err = peer2.Connect(":6002", "127.0.0.1:7001")
+		if err != nil {
+			fmt.Println("E:", err)
+			return
+		}
+		wait()
+
 		//=============== PUB example =======
 		var test = "test-test"
 		var result string
@@ -57,8 +57,8 @@ func main() {
 		wait()
 
 		fmt.Println("====== PUB example =======")
-		peer1.Publish(TOPIC_1, fmt.Sprint(test))
-		time.Sleep(time.Millisecond * 100)
+		peer1.Publish(TOPIC_1, test)
+		wait()
 		if test != result {
 			fmt.Println("E: ===> ERROR: expected", test, "but got", result)
 		} else {
@@ -118,8 +118,8 @@ func main() {
 		for i := 0; i < 5; i++ {
 			peer1.Request(TOPIC_2, nil, func(s string) {
 				fmt.Println("=====>", s)
-				wait()
 			})
+			wait()
 		}
 		wait()
 
@@ -129,19 +129,12 @@ func main() {
 			fmt.Println("=====>", s)
 		}, time.Second)
 		wait()
-	*/
 
-	time.Sleep(time.Second * 5) // are there any requests pending?
-	/*
+		time.Sleep(time.Second * 2) // are there any requests pending?
+
 		fmt.Println("====== Drop Peer #2 =======")
 		peer2.Destroy() // removed from the cluster
-		wait()
-
-		/*
-			fmt.Println("====== Drop Peer #1 =======")
-			peer1.Destroy() // removed from the cluster
-			wait()
 	*/
 
-	//time.Sleep(time.Second)
+	time.Sleep(time.Second * 5)
 }

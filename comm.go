@@ -1341,17 +1341,20 @@ func (this *Client) Send(kind EKind, name string, payload interface{}, handler i
 	return this.wire.Send(msg)
 }
 
+// Wired serves as a read only construct to topic handlers
 type Wired struct {
 	conn net.Conn
 	wire *Wire
 }
 
-func (this *Wired) Conn() net.Conn {
-	return this.conn
+// Conn gets the connection
+func (w *Wired) Conn() net.Conn {
+	return w.conn
 }
 
-func (this *Wired) Wire() *Wire {
-	return this.wire
+//Wire gets the wire
+func (w *Wired) Wire() *Wire {
+	return w.wire
 }
 
 // Wires manages a collection of connections as if they were one.
@@ -1367,7 +1370,8 @@ type Wires struct {
 	groups          map[string][]*Wired
 	cursor          int
 	Codec           Codec
-	onSendListeners map[*SendListener]bool
+	onSendListeners map[uint64]SendListener
+	sendListenerIdx uint64
 }
 
 type SendListener func(event SendEvent)
@@ -1380,19 +1384,24 @@ type SendEvent struct {
 }
 
 // AddSendListener adds a listener on send messages (Publis/Push/RequestAll/Request)
-func (this *Wires) AddSendListener(listener SendListener) *SendListener {
-	this.onSendListeners[&listener] = true
-	return &listener
+func (this *Wires) AddSendListener(idx uint64, listener SendListener) uint64 {
+	var h uint64
+	if idx == 0 {
+		this.sendListenerIdx++
+		h = this.sendListenerIdx
+	}
+	this.onSendListeners[h] = listener
+	return h
 }
 
 // RemoveSendListener removes a previously added listener on send messages
-func (this *Wires) RemoveSendListener(listener *SendListener) {
-	delete(this.onSendListeners, listener)
+func (this *Wires) RemoveSendListener(idx uint64) {
+	delete(this.onSendListeners, idx)
 }
 
 func (this *Wires) fireSendListener(event SendEvent) {
-	for listener := range this.onSendListeners {
-		(*listener)(event)
+	for _,listener := range this.onSendListeners {
+		listener(event)
 	}
 }
 
@@ -1402,7 +1411,7 @@ func NewWires(codec Codec) *Wires {
 		wires:           make([]*Wired, 0),
 		groups:          make(map[string][]*Wired),
 		Codec:           codec,
-		onSendListeners: make(map[*SendListener]bool),
+		onSendListeners: make(map[uint64]SendListener),
 	}
 }
 
@@ -1816,7 +1825,7 @@ func (this *Server) Listen(service string) error {
 					// check to see if we are disconnecting the same connection
 					if c == conn {
 						// handle errors during a connection
-						if faults.Has(e, io.EOF) || isClosed(e){
+						if faults.Has(e, io.EOF) || isClosed(e) {
 							logger.Infof("< [wire.disconnected] client %s closed connection", c.RemoteAddr())
 						} else if e != nil {
 							logger.Errorf("< [wire.disconnected] %s", faults.Wrap(e))

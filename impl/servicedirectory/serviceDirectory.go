@@ -256,7 +256,7 @@ func NewNode() *Node {
 		providers:    make(map[string]*Provider),
 	}
 	node.local = gomsg.NewServer()
-	node.AddSendListener(func(event gomsg.SendEvent) {
+	node.AddSendListener(0, func(event gomsg.SendEvent) {
 		node.lazyConnect(event.Name)
 	})
 	return node

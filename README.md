@@ -1,11 +1,12 @@
 gomsg
 =====
 
-Building blocks for message queues solutions in Go
+Building blocks for message networks solutions in Go
 
-This is a **work in progress**.
+This is a **WORK IN PROGRESS**.
 
-This is an exercise to see what I could do in Go regarding networking and also to learn a bit more about Go.
+This is an exercise to see what I could do in Go 
+regarding networking and also to learn a bit more about Go.
 
 The idea is that one client endpoint connects to a server endpoint,
 and as soon the connection is established you can send and receive messages in either endpoint.
@@ -17,10 +18,40 @@ Features
 -
 * Publish/Subscribe
 * Push/Pull
-* Request/Reply (single or multiple replies)
-* RequestAll/Reply (multiple endpoints replying)
+* Request/Reply (only one provider replies)
+* RequestAll/ReplyAll (all providers reply)
+* Message handler functions receiving any kind of data
 * Message Filters
 * Client Groups
+* Temporary sticky endpoint by topic
+
+A simple example
+
+```go
+// my custom data
+type Sample struct {
+    instant     time.Time
+    voltage     float64
+}
+```
+```go
+// create server
+var server = gomsg.NewServer()
+// we can handler messages in the server or in the client
+server.Handle("TELEMETRY", func(data Sample) {
+    fmt.Printf("received %+v\n", data)
+})
+server.Listen(":7777")
+
+// create a client - the one that connects
+var cli = gomsg.NewClient()
+cli.Connect("localhost:7777")
+// Publish data to the other end
+cli.Publish("TELEMETRY", Sample{time.Now(), 234.56})
+
+// give time for things to happen
+time.Sleep(time.Millisecond * 10)
+```
 
 The following example show a simple message bus.
 Three clients connect to a server, and one of them publishs a message that will be received by the other two.

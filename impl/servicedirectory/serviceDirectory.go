@@ -391,7 +391,10 @@ func (node *Node) Connect(bindAddr string, dirAddrs ...string) error {
 			node.dirs.Kill(c)
 			for k, v := range node.remoteDirs {
 				if v.Connection() == c {
-					node.remoteDirs = append(node.remoteDirs[:k], node.remoteDirs[k+1:]...)
+					// since the slice has a non-primitive, we have to zero it
+					copy(node.remoteDirs[k:], node.remoteDirs[k+1:])
+					node.remoteDirs[len(node.remoteDirs)-1] = nil // zero it
+					node.remoteDirs = node.remoteDirs[:len(node.remoteDirs)-1]
 				}
 			}
 		}

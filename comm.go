@@ -1391,13 +1391,11 @@ type SendEvent struct {
 
 // AddSendListener adds a listener on send messages (Publis/Push/RequestAll/Request)
 func (this *Wires) AddSendListener(idx uint64, listener SendListener) uint64 {
-	var h uint64
 	if idx == 0 {
-		this.sendListenerIdx++
-		h = this.sendListenerIdx
+		idx = atomic.AddUint64(&this.sendListenerIdx, 1)
 	}
-	this.onSendListeners[h] = listener
-	return h
+	this.onSendListeners[idx] = listener
+	return idx
 }
 
 // RemoveSendListener removes a previously added listener on send messages
@@ -1513,7 +1511,11 @@ func (this *Wires) Kill(conn net.Conn) {
 func remove(conn net.Conn, wires []*Wired) ([]*Wired, *Wired) {
 	for k, v := range wires {
 		if v.conn == conn {
-			return append(wires[:k], wires[k+1:]...), v
+			// since the slice has a non-primitive, we have to zero it
+			copy(wires[k:], wires[k+1:])
+			wires[len(wires)-1] = nil // zero it
+			wires = wires[:len(wires)-1]
+			return wires, v
 		}
 	}
 	return wires, nil

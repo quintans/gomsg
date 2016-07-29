@@ -1367,7 +1367,7 @@ func (w *Wired) Wire() *Wire {
 type Wires struct {
 	mu              sync.RWMutex
 	wires           []*Wired
-	groups          map[string][]*Wired
+	groups          map[string]*Group
 	cursor          int
 	stickies        map[string]*sticky
 	Codec           Codec
@@ -1375,9 +1375,15 @@ type Wires struct {
 	sendListenerIdx uint64
 }
 
+type Group struct {
+	wires  []*Wired
+	cursor int
+}
+
 type sticky struct {
 	duration time.Duration
 	timeout  time.Time
+	lastWire *Wired
 }
 
 type SendListener func(event SendEvent)
@@ -1413,7 +1419,7 @@ func (this *Wires) fireSendListener(event SendEvent) {
 func NewWires(codec Codec) *Wires {
 	return &Wires{
 		wires:           make([]*Wired, 0),
-		groups:          make(map[string][]*Wired),
+		groups:          make(map[string]*Group),
 		stickies:        make(map[string]*sticky),
 		Codec:           codec,
 		onSendListeners: make(map[uint64]SendListener),
@@ -1445,7 +1451,10 @@ func (this *Wires) Destroy() {
 		v.conn = nil
 	}
 	this.wires = make([]*Wired, 0)
-	this.groups = make(map[string][]*Wired)
+	this.groups = make(map[string]*Group)
+	this.stickies = make(map[string]*sticky)
+	this.onSendListeners = make(map[uint64]SendListener)
+	this.cursor = 0
 }
 
 func (this *Wires) Put(conn net.Conn, wire *Wire) *Wired {
@@ -1466,9 +1475,10 @@ func (this *Wires) Put(conn net.Conn, wire *Wire) *Wired {
 	this.wires = append(this.wires, wired)
 	group := this.groups[wire.groupId]
 	if group == nil {
-		group = make([]*Wired, 0)
+		group = &Group{make([]*Wired, 0), 0}
+		this.groups[wire.groupId] = group
 	}
-	this.groups[wire.groupId] = append(group, wired)
+	group.wires = append(group.wires, wired)
 	return wired
 }
 
@@ -1499,7 +1509,13 @@ func (this *Wires) Kill(conn net.Conn) {
 	if w != nil {
 		group := this.groups[w.wire.groupId]
 		if group != nil {
-			this.groups[w.wire.groupId], _ = remove(conn, group)
+			group.wires, _ = remove(conn, group.wires)
+		}
+		// remove from stikies
+		for _, v := range this.stickies {
+			if v.lastWire == w {
+				v.lastWire = nil
+			}
 		}
 		w.wire.Destroy()
 		w.conn.Close()
@@ -1521,91 +1537,94 @@ func remove(conn net.Conn, wires []*Wired) ([]*Wired, *Wired) {
 	return wires, nil
 }
 
-func (this *Wires) GetAll() ([]*Wired, int) {
-	return this.list(false)
+func rotate(wires []*Wired, cur int) int {
+	cur++
+	if cur >= len(wires) {
+		cur = 0
+	}
+	return cur
 }
 
-func (this *Wires) stickyTimeout(name string) bool {
+func (this *Wires) GetAll() ([]*Wired, int) {
 	this.mu.Lock()
-	var stick = this.stickies[name]
-	var rotate = stick == nil ||
-		stick.timeout == time.Time{} ||
-		time.Now().After(stick.timeout)
+	defer this.mu.Unlock()
 
-	if stick != nil {
-		stick.timeout = time.Now().Add(stick.duration)
+	this.cursor = rotate(this.wires, this.cursor)
+	return clone(this.wires), this.cursor
+}
+
+func (this *Wires) stickyTimeout(name string, wires []*Wired, cur int) (int, bool) {
+	if len(wires) == 0 {
+		return cur, true
 	}
-	this.mu.Unlock()
 
-	return rotate
+	var stick = this.stickies[name]
+	if stick == nil {
+		return rotate(wires, cur), true
+	}
+
+	var timeout = stick.timeout == time.Time{} ||
+		time.Now().After(stick.timeout)
+	stick.timeout = time.Now().Add(stick.duration)
+
+	if timeout {
+		cur = rotate(wires, cur)
+		stick.lastWire = wires[cur]
+		return cur, true
+	}
+
+	// find cursor for last used wire
+	for k, v := range wires {
+		if v == stick.lastWire {
+			return k, false
+		}
+	}
+	// if we are here, the lastWire is invalid
+	stick.lastWire = nil
+
+	return cur, true
 }
 
 func (this *Wires) Rotate(name string) ([]*Wired, int) {
-	if this.stickyTimeout(name) {
-		return this.list(true)
-	}
-
-	return this.list(false)
-}
-
-func (this *Wires) list(rotate bool) ([]*Wired, int) {
 	this.mu.Lock()
-	w := make([]*Wired, len(this.wires))
-	copy(w, this.wires)
+	defer this.mu.Unlock()
 
-	if rotate {
-		this.cursor++
+	var cur, ok = this.stickyTimeout(name, this.wires, this.cursor)
+	var ws []*Wired
+	ws = clone(this.wires)
+	// updates original cursor position if rotates
+	if ok {
+		this.cursor = cur
 	}
-
-	if this.cursor >= len(this.wires) {
-		this.cursor = 0
-	}
-
-	c := this.cursor
-	this.mu.Unlock()
-
-	return w, c
-
-	/*
-		r := make([]*Wired, size)
-		copy(r, this.wires)
-		// rotate
-		if rotate && size > 1 {
-			// too expensive?
-			this.wires = append(this.wires[1:], this.wires[:1]...)
-		}
-		return r
-	*/
+	return ws, cur
 }
 
-func (this *Wires) RotateGroups() (map[string][]*Wired, int) {
-	return this.listGroups(true)
+func clone(wires []*Wired) []*Wired {
+	// clone
+	w := make([]*Wired, len(wires))
+	copy(w, wires)
+
+	return w
 }
 
-func (this *Wires) GetAllGroups() (map[string][]*Wired, int) {
-	return this.listGroups(false)
-}
-
-func (this *Wires) listGroups(rotate bool) (map[string][]*Wired, int) {
+// RotateGroups rotates groups
+func (this *Wires) RotateGroups(name string) map[string]*Group {
 	this.mu.Lock()
-	newMap := make(map[string][]*Wired)
+	defer this.mu.Unlock()
+
+	newMap := make(map[string]*Group)
 	for k, v := range this.groups {
-		w := make([]*Wired, len(v))
-		copy(w, v)
-		newMap[k] = w
+		var cur, ok = this.stickyTimeout(name, v.wires, v.cursor)
+		var ws []*Wired
+		ws = clone(this.wires)
+		// updates original cursor position if rotates
+		if ok {
+			v.cursor = cur
+		}
+		newMap[k] = &Group{ws, cur}
 	}
 
-	if rotate {
-		this.cursor++
-	}
-	if this.cursor >= len(this.wires) {
-		this.cursor = 0
-	}
-
-	c := this.cursor
-	this.mu.Unlock()
-
-	return newMap, c
+	return newMap
 }
 
 func (this *Wires) Size() int {
@@ -1667,7 +1686,6 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 	if msg.kind == PUSH || msg.kind == REQ {
 		go func() {
 			var ws, cursor = this.Rotate(name)
-
 			l := NewLooper(cursor, len(ws))
 			for l.HasNext() {
 				w := ws[l.Next()]
@@ -1684,22 +1702,14 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 			errch <- err
 		}()
 	} else if msg.kind == PUB {
-		var lastCursor = this.cursor
-		// collects wires into groups. They will be called last.
-		groups, cursor := this.RotateGroups()
-		// for the groups
-		var grpcur int
-		if this.stickyTimeout(name) {
-			grpcur = lastCursor
-		} else {
-			grpcur = cursor
-		}
 		go func() {
+			// collects wires into groups.
+			var groups = this.RotateGroups(name)
 			for id, group := range groups {
 				if id == "" {
-					l := NewLooper(cursor, len(group))
+					l := NewLooper(group.cursor, len(group.wires))
 					for l.HasNext() {
-						w := group[l.Next()]
+						w := group.wires[l.Next()]
 						// do not send to self
 						if skipWire == nil || skipWire != w.wire {
 							e := <-w.wire.Send(msg)
@@ -1709,11 +1719,10 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 						}
 					}
 				} else {
-					go func(ws []*Wired) {
-						size := len(ws)
-						l := NewLooper(grpcur%size, size)
+					go func(grp *Group) {
+						l := NewLooper(grp.cursor, len(grp.wires))
 						for l.HasNext() {
-							w := ws[l.Next()]
+							w := grp.wires[l.Next()]
 							// do not send to self
 							if skipWire == nil || skipWire != w.wire {
 								e := <-w.wire.Send(msg)
@@ -1753,22 +1762,13 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 			}
 		}
 
-		var lastCursor = this.cursor
-		// collects wires into groups. They will be called last.
-		groups, cursor := this.RotateGroups()
-		// for the groups
-		var grpcur int
-		if this.stickyTimeout(name) {
-			grpcur = lastCursor
-		} else {
-			grpcur = cursor
-		}
-
+		// collects wires into groups.
+		var groups = this.RotateGroups(name)
 		for id, group := range groups {
 			if id == "" {
-				l := NewLooper(cursor, len(group))
+				l := NewLooper(group.cursor, len(group.wires))
 				for l.HasNext() {
-					w := group[l.Next()]
+					w := group.wires[l.Next()]
 					// do not send to self
 					if skipWire == nil || skipWire != w.wire {
 						// increment reply counter
@@ -1789,11 +1789,10 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 			} else {
 				// increment reply counter
 				wg.Add(1)
-				go func(ws []*Wired) {
-					size := len(ws)
-					l := NewLooper(grpcur%size, size)
+				go func(grp *Group) {
+					l := NewLooper(grp.cursor, len(grp.wires))
 					for l.HasNext() {
-						w := group[l.Next()]
+						w := grp.wires[l.Next()]
 						// do not send to self
 						if skipWire == nil || skipWire != w.wire {
 							// waits for the request completion

@@ -20,9 +20,15 @@ func main() {
 	cli.Handle("PUSH", func(ctx *gomsg.Request, m string) {
 		fmt.Println("<=== processing PUSH (1):", m, "from", ctx.Connection().RemoteAddr())
 	})
+	cli.Handle("NOISE", func(ctx *gomsg.Request, m string) {
+		fmt.Println("<=== processing NOISE (21):", m, "from", ctx.Connection().RemoteAddr())
+	})
 
 	cli2.Handle("PUSH", func(ctx *gomsg.Request, m string) {
 		fmt.Println("<=== processing PUSH (2):", m, "from", ctx.Connection().RemoteAddr())
+	})
+	cli2.Handle("NOISE", func(ctx *gomsg.Request, m string) {
+		fmt.Println("<=== processing NOISE (22):", m, "from", ctx.Connection().RemoteAddr())
 	})
 
 	cli.Connect("localhost:7777")
@@ -31,13 +37,19 @@ func main() {
 	wait()
 
 	server.Stick("PUSH", time.Millisecond*500)
-	server.Push("PUSH", "hello")
+
+	server.Push("PUSH", "ping")
 	wait()
-	server.Push("PUSH", "world")
+	server.Push("PUSH", "ping")
 	wait()
-	server.Push("PUSH", "olá")
+
+	server.Push("NOISE", "---noise---")
 	wait()
-	server.Push("PUSH", "mundo")
+	server.Push("PUSH", "ping")
+	wait()
+	server.Push("NOISE", "---noise---")
+	wait()
+	server.Push("PUSH", "ping")
 	time.Sleep(time.Second)
 	server.Push("PUSH", "change wire")
 	wait()

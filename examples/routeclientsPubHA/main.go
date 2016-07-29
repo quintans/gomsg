@@ -59,13 +59,13 @@ func main() {
 	wait()
 
 	if ungrouped != 4 {
-		fmt.Println("RECEIVED", ungrouped, "UNGROUPED EVENTS. EXPECTED 4.")
+		fmt.Println("ERROR: RECEIVED", ungrouped, "UNGROUPED EVENTS. EXPECTED 4.")
 	}
 	if group1 != 2 {
-		fmt.Println("RECEIVED", group1, "GROUP EVENTS. EXPECTED 2.")
+		fmt.Println("ERROR: RECEIVED", group1, "GROUP EVENTS. EXPECTED 2.")
 	}
 	if group2 != 2 {
-		fmt.Println("RECEIVED", group2, "GROUP EVENTS. EXPECTED 2.")
+		fmt.Println("ERROR: RECEIVED", group2, "GROUP EVENTS. EXPECTED 2.")
 	}
 	wait()
 	cli.Destroy()
@@ -73,5 +73,5 @@ func main() {
 }
 
 func wait() {
-	time.Sleep(time.Millisecond * 10)
+	time.Sleep(time.Millisecond * 100)
 }

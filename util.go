@@ -155,3 +155,59 @@ func (timeout *Timeout) Delay(o interface{}) {
 
 	timeout.what[o] = time.Now().Add(timeout.duration)
 }
+
+type KeyValueItem struct {
+	Key   interface{}
+	Value interface{}
+}
+
+type KeyValue struct {
+	Items []*KeyValueItem
+}
+
+func NewKeyValue() *KeyValue {
+	return &KeyValue{make([]*KeyValueItem, 0)}
+}
+
+func (kv *KeyValue) Put(key interface{}, value interface{}) interface{} {
+
+	// if already defined, replace value and return old one
+	for _, v := range kv.Items {
+		if v.Key == key {
+			var old = v.Value
+			v.Value = value
+			return old
+		}
+	}
+	var item = &KeyValueItem{key, value}
+	kv.Items = append(kv.Items, item)
+	return nil
+}
+
+func (kv *KeyValue) Get(key interface{}) interface{} {
+	return kv.Find(func(item *KeyValueItem) bool {
+		return item.Key == key
+	})
+}
+
+func (kv *KeyValue) Find(fn func(item *KeyValueItem) bool) *KeyValueItem {
+	for _, v := range kv.Items {
+		if fn(v) {
+			return v
+		}
+	}
+	return nil
+}
+
+func (kv *KeyValue) Delete(key interface{}) interface{} {
+	for k, v := range kv.Items {
+		if v.Key == key {
+			// since the slice has a non-primitive, we have to zero it
+			copy(kv.Items[k:], kv.Items[k+1:])
+			kv.Items[len(kv.Items)-1] = nil // zero it
+			kv.Items = kv.Items[:len(kv.Items)-1]
+			return v.Value
+		}
+	}
+	return nil
+}

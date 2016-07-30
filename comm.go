@@ -379,11 +379,9 @@ func (this *Wire) hasRemoteTopic(name string) bool {
 	this.mutop.Lock()
 	defer this.mutop.Unlock()
 
-	var prefix string
-	for k, _ := range this.remoteTopics {
+	for k := range this.remoteTopics {
 		if strings.HasSuffix(k, FILTER_TOKEN) {
-			prefix = k[:len(k)-1]
-			if strings.HasPrefix(name, prefix) {
+			if strings.HasPrefix(name, k[:len(k)-1]) {
 				return true
 			}
 		} else if name == k {
@@ -1369,7 +1367,7 @@ type Wires struct {
 	wires           []*Wired
 	groups          map[string]*Group
 	cursor          int
-	stickies        map[string]*sticky
+	stickies        *Filter
 	Codec           Codec
 	onSendListeners map[uint64]SendListener
 	sendListenerIdx uint64
@@ -1420,7 +1418,7 @@ func NewWires(codec Codec) *Wires {
 	return &Wires{
 		wires:           make([]*Wired, 0),
 		groups:          make(map[string]*Group),
-		stickies:        make(map[string]*sticky),
+		stickies:        NewFilter(),
 		Codec:           codec,
 		onSendListeners: make(map[uint64]SendListener),
 	}
@@ -1430,9 +1428,9 @@ func NewWires(codec Codec) *Wires {
 // if the time between messages is smaller than the duration argument.
 func (this *Wires) Stick(name string, duration time.Duration) {
 	if duration == time.Duration(0) {
-		delete(this.stickies, name)
+		this.stickies.Delete(name)
 	} else {
-		this.stickies[name] = &sticky{duration: duration}
+		this.stickies.Put(name, &sticky{duration: duration})
 	}
 }
 
@@ -1452,7 +1450,7 @@ func (this *Wires) Destroy() {
 	}
 	this.wires = make([]*Wired, 0)
 	this.groups = make(map[string]*Group)
-	this.stickies = make(map[string]*sticky)
+	this.stickies = NewFilter()
 	this.onSendListeners = make(map[uint64]SendListener)
 	this.cursor = 0
 }
@@ -1512,9 +1510,10 @@ func (this *Wires) Kill(conn net.Conn) {
 			group.wires, _ = remove(conn, group.wires)
 		}
 		// remove from stikies
-		for _, v := range this.stickies {
-			if v.lastWire == w {
-				v.lastWire = nil
+		for _, v := range this.stickies.Items {
+			var s = v.Value.(*sticky)
+			if s.lastWire == w {
+				s.lastWire = nil
 			}
 		}
 		w.wire.Destroy()
@@ -1558,10 +1557,13 @@ func (this *Wires) stickyTimeout(name string, wires []*Wired, cur int) (int, boo
 		return cur, true
 	}
 
-	var stick = this.stickies[name]
-	if stick == nil {
+	// find sticky filter that intercepts name
+	var match = this.stickies.Match(name)
+	if match == nil {
 		return rotate(wires, cur), true
 	}
+
+	var stick = match.(*sticky)
 
 	var timeout = stick.timeout == time.Time{} ||
 		time.Now().After(stick.timeout)
@@ -2093,4 +2095,27 @@ func isClosed(e error) bool {
 		}
 	}
 	return false
+}
+
+type Filter struct {
+	*KeyValue
+}
+
+func NewFilter() *Filter {
+	return &Filter{NewKeyValue()}
+}
+
+func (filter *Filter) Match(name string) interface{} {
+	// find key filter that intercepts name
+	for _, item := range filter.Items {
+		var s = item.Key.(string)
+		if strings.HasSuffix(s, FILTER_TOKEN) {
+			if strings.HasPrefix(name, s[:len(s)-1]) {
+				return item.Value
+			}
+		} else if name == s {
+			return item.Value
+		}
+	}
+	return nil
 }

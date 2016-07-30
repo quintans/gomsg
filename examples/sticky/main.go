@@ -17,15 +17,15 @@ func main() {
 
 	fmt.Println("=========== STICKY PUSH =============")
 
-	cli.Handle("PUSH", func(ctx *gomsg.Request, m string) {
-		fmt.Println("<=== processing PUSH (1):", m, "from", ctx.Connection().RemoteAddr())
+	cli.Handle("PUSHING", func(ctx *gomsg.Request, m string) {
+		fmt.Println("<=== processing PUSHING (1):", m, "from", ctx.Connection().RemoteAddr())
 	})
 	cli.Handle("NOISE", func(ctx *gomsg.Request, m string) {
 		fmt.Println("<=== processing NOISE (21):", m, "from", ctx.Connection().RemoteAddr())
 	})
 
-	cli2.Handle("PUSH", func(ctx *gomsg.Request, m string) {
-		fmt.Println("<=== processing PUSH (2):", m, "from", ctx.Connection().RemoteAddr())
+	cli2.Handle("PUSHING", func(ctx *gomsg.Request, m string) {
+		fmt.Println("<=== processing PUSHING (2):", m, "from", ctx.Connection().RemoteAddr())
 	})
 	cli2.Handle("NOISE", func(ctx *gomsg.Request, m string) {
 		fmt.Println("<=== processing NOISE (22):", m, "from", ctx.Connection().RemoteAddr())
@@ -36,22 +36,23 @@ func main() {
 
 	wait()
 
-	server.Stick("PUSH", time.Millisecond*500)
+	// note the FILTER_TOKEN at the end. This way we can define a range of Stickyness
+	server.Stick("PUSH"+gomsg.FILTER_TOKEN, time.Millisecond*500)
 
-	server.Push("PUSH", "ping")
+	server.Push("PUSHING", "ping")
 	wait()
-	server.Push("PUSH", "ping")
+	server.Push("PUSHING", "ping")
 	wait()
 
-	server.Push("NOISE", "---noise---")
+	server.Push("NOISE", "---noise--- will provoque the rotation of the general cursor")
 	wait()
-	server.Push("PUSH", "ping")
+	server.Push("PUSHING", "ping")
 	wait()
-	server.Push("NOISE", "---noise---")
+	server.Push("NOISE", "---noise--- will provoque the rotation of the general cursor")
 	wait()
-	server.Push("PUSH", "ping")
+	server.Push("PUSHING", "ping")
 	time.Sleep(time.Second)
-	server.Push("PUSH", "change wire")
+	server.Push("PUSHING", "change wire")
 	wait()
 
 	fmt.Println("=========== STICKY REQUEST =============")

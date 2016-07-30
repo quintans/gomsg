@@ -25,16 +25,16 @@ const (
 	// PEERREADY is the topic to inform that the peer is ready,
 	// to pass its services and to ask for the already  available services
 	C_PEERREADY = "C_PEERREADY" // server -> client
-	S_PEERREADY = "S_PEERREADY" // client -> server
+	S_PEERREADY = "DIR/PEERREADY" // client -> server
 	// ADDSERVICE is the topic used to inform the cluster of new service offering
 	C_ADDSERVICE = "C_ADDSERVICE"
-	S_ADDSERVICE = "S_ADDSERVICE"
+	S_ADDSERVICE = "DIR/ADDSERVICE"
 	// CANCELSERVICE is the topic used to inform the cluster of cancel a service offering
 	C_CANCELSERVICE = "C_CANCELSERVICE"
-	S_CANCELSERVICE = "S_CANCELSERVICE"
+	S_CANCELSERVICE = "DIR/CANCELSERVICE"
 	// DROPPEER is the topic to inform the peers of a peer disconnect
 	C_DROPPEER = "C_DROPPEER"
-	S_DROPPEER = "S_DROPPEER"
+	S_DROPPEER = "DIR/DROPPEER"
 )
 
 const (
@@ -256,6 +256,9 @@ func NewNode() *Node {
 		providers:    make(map[string]*Provider),
 	}
 	node.local = gomsg.NewServer()
+	// consecutive calls under 500 ms to "DIR/*"
+	// will be consumed by the same directory node
+	node.dirs.Stick("DIR/*", time.Millisecond * 500)
 	node.AddSendListener(0, func(event gomsg.SendEvent) {
 		node.lazyConnect(event.Name)
 	})

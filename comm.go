@@ -334,9 +334,10 @@ type Wire struct {
 	disconnected func(net.Conn, error)
 	findHandler  func(name string) func(ctx *Request)
 
-	mutop        sync.RWMutex
-	groupId      string // When it is a client wire, it is used for High Availability
-	remoteTopics map[string]bool
+	mutop         sync.RWMutex
+	remoteGroupID string // it is used for High Availability
+	localGroupID  string // it is used for High Availability
+	remoteTopics  map[string]bool
 }
 
 func NewWire(codec Codec) *Wire {
@@ -1049,21 +1050,21 @@ func (this *Client) SetCodec(codec Codec) *Client {
 // Make it belong to a group.
 // Only one element at a time (round-robin) handles the messages.
 func (this *Client) SetGroupId(groupId string) *Client {
-	this.wire.groupId = groupId
+	this.wire.localGroupID = groupId
 	return this
 }
 
 func (this *Client) handshake(c net.Conn) error {
-	this.muhnd.Lock()
-	size := len(this.handlers) + 1
-	payload := make([]string, size)
-	payload[0] = this.wire.groupId
+	this.muhnd.RLock()
+	var size = len(this.handlers) + 1
+	var payload = make([]string, size)
+	payload[0] = this.wire.localGroupID
 	i := 1
 	for k := range this.handlers {
 		payload[i] = k
 		i++
 	}
-	this.muhnd.Unlock()
+	this.muhnd.RUnlock()
 
 	err := serializeHanshake(c, this.wire.codec, this.timeout, payload)
 	if err != nil {
@@ -1071,12 +1072,13 @@ func (this *Client) handshake(c net.Conn) error {
 	}
 
 	// get reply
-	_, remoteTopics, err := deserializeHandshake(c, this.wire.codec, this.timeout, false)
+	group, remoteTopics, err := deserializeHandshake(c, this.wire.codec, this.timeout)
 	if err != nil {
 		return err
 	}
 	this.wire.mutop.Lock()
 	this.wire.remoteTopics = remoteTopics
+	this.wire.remoteGroupID = group
 	this.wire.mutop.Unlock()
 
 	return nil
@@ -1114,7 +1116,7 @@ func serializeHanshake(c net.Conn, codec Codec, timeout time.Duration, payload [
 	return buf.Flush()
 }
 
-func deserializeHandshake(c net.Conn, codec Codec, timeout time.Duration, isFromClient bool) (string, map[string]bool, error) {
+func deserializeHandshake(c net.Conn, codec Codec, timeout time.Duration) (string, map[string]bool, error) {
 	c.SetReadDeadline(timeouttime(timeout))
 
 	r := NewInputStream(c)
@@ -1141,11 +1143,8 @@ func deserializeHandshake(c net.Conn, codec Codec, timeout time.Duration, isFrom
 			}
 		}
 	}
-	var identity string
-	if isFromClient {
-		identity = topics[0]
-		topics = topics[1:]
-	}
+	var identity = topics[0]
+	topics = topics[1:]
 	remoteTopics := make(map[string]bool)
 	for _, v := range topics {
 		remoteTopics[v] = true
@@ -1471,10 +1470,10 @@ func (this *Wires) Put(conn net.Conn, wire *Wire) *Wired {
 	}
 	wired := &Wired{conn, wire}
 	this.wires = append(this.wires, wired)
-	group := this.groups[wire.groupId]
+	group := this.groups[wire.remoteGroupID]
 	if group == nil {
 		group = &Group{make([]*Wired, 0), 0}
-		this.groups[wire.groupId] = group
+		this.groups[wire.remoteGroupID] = group
 	}
 	group.wires = append(group.wires, wired)
 	return wired
@@ -1505,7 +1504,7 @@ func (this *Wires) Kill(conn net.Conn) {
 	var w *Wired
 	this.wires, w = remove(conn, this.wires)
 	if w != nil {
-		group := this.groups[w.wire.groupId]
+		group := this.groups[w.wire.remoteGroupID]
 		if group != nil {
 			group.wires, _ = remove(conn, group.wires)
 		}
@@ -1617,8 +1616,7 @@ func (this *Wires) RotateGroups(name string) map[string]*Group {
 	newMap := make(map[string]*Group)
 	for k, v := range this.groups {
 		var cur, ok = this.stickyTimeout(name, v.wires, v.cursor)
-		var ws []*Wired
-		ws = clone(this.wires)
+		var ws = clone(v.wires)
 		// updates original cursor position if rotates
 		if ok {
 			v.cursor = cur
@@ -1873,13 +1871,13 @@ func (this *Server) Listen(service string) error {
 			wire.findHandler = this.findHandler
 
 			// topic exchange
-			group, remoteTopics, err := this.handshake(c, this.Codec)
+			group, remoteTopics, err := this.handshake(c, wire)
 
 			if err != nil {
 				c.Close()
 				logger.Errorf("< Failed to handshake: %s", err)
 			} else {
-				wire.groupId = group
+				wire.remoteGroupID = group
 				wire.remoteTopics = remoteTopics
 				wire.disconnected = func(conn net.Conn, e error) {
 					this.muconn.Lock()
@@ -1922,26 +1920,26 @@ func (this *Server) Port() int {
 	return this.listener.Addr().(*net.TCPAddr).Port
 }
 
-func (this *Server) handshake(c net.Conn, codec Codec) (string, map[string]bool, error) {
+func (this *Server) handshake(c net.Conn, wire *Wire) (string, map[string]bool, error) {
 	// get remote topics
-	group, payload, err := deserializeHandshake(c, codec, this.timeout, true)
+	group, payload, err := deserializeHandshake(c, wire.codec, this.timeout)
 	if err != nil {
 		return "", nil, err
 	}
 
-	// send local topics
-	// topic exchange
+	// send identity and local topics
 	this.muhnd.RLock()
-	size := len(this.handlers)
-	topics := make([]string, size)
-	i := 0
-	for k, _ := range this.handlers {
+	var size = len(this.handlers) + 1
+	var topics = make([]string, size)
+	topics[0] = wire.localGroupID
+	i := 1
+	for k := range this.handlers {
 		topics[i] = k
 		i++
 	}
 	this.muhnd.RUnlock()
 
-	err = serializeHanshake(c, codec, this.timeout, topics)
+	err = serializeHanshake(c, wire.codec, this.timeout, topics)
 	if err != nil {
 		return "", nil, err
 	}

@@ -399,13 +399,11 @@ func (this *Wire) asynchWaitForCallback(msg Envelope) {
 	// frame channel
 	ch := make(chan Response, 1)
 	this.callbacks[msg.sequence] = ch
-	// since we can have multi replies, we have to calculate the deadline for all of them
-	deadline := time.Now().Add(msg.timeout)
 	// error channel
 	go func() {
 		for {
 			select {
-			case <-time.After(deadline.Sub(time.Now())):
+			case <-time.After(msg.timeout):
 				this.delCallback(msg.sequence)
 				msg.errch <- TimeoutError(faults.New(TIMEOUT, msg.kind, msg.name))
 				break
@@ -1865,7 +1863,7 @@ func (this *Server) Listen(service string) error {
 				logger.Infof("< [Listen] Stoped listening at %s", l.Addr())
 				return
 			}
-			logger.Infof("< [Listen] accepted connection from %s", c.RemoteAddr())
+			logger.Debugf("< [Listen] accepted connection from %s", c.RemoteAddr())
 
 			wire := NewWire(this.Codec)
 			wire.findHandler = this.findHandler

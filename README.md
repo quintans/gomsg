@@ -137,4 +137,3 @@ Todo
 -
 * More Tests
 * Documentation
-* replace `fmt.Println` from the code with a logging framework

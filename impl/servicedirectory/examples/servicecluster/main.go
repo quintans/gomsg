@@ -21,13 +21,13 @@ func wait() {
 func main() {
 	log.Register("/", log.INFO)
 
-	var dir1 = servicedirectory.NewServiceDirectory("DIR#1")
+	var dir1 = servicedirectory.NewDirectory("DIR#1")
 	var err = dir1.Listen(":7001")
 	if err != nil {
 		fmt.Println("E:", err)
 		os.Exit(1)
 	}
-	var dir2 = servicedirectory.NewServiceDirectory("DIR#2")
+	var dir2 = servicedirectory.NewDirectory("DIR#2")
 	err = dir2.Listen(":7002")
 	if err != nil {
 		fmt.Println("E:", err)
@@ -38,7 +38,7 @@ func main() {
 	var dirs = []string{"127.0.0.1:7001", "127.0.0.1:7002"}
 
 	fmt.Println("==== Adding peer #1 ====")
-	var peer1 = servicedirectory.NewNode("Peer#1")
+	var peer1 = servicedirectory.NewPeer("Peer#1")
 	err = peer1.Connect(":6001", dirs...)
 	if err != nil {
 		fmt.Println("E:", err)
@@ -47,7 +47,7 @@ func main() {
 	wait()
 
 	fmt.Println("==== Adding peer #2 ====")
-	var peer2 = servicedirectory.NewNode("Peer#2")
+	var peer2 = servicedirectory.NewPeer("Peer#2")
 	err = peer2.Connect(":6002", dirs...)
 	if err != nil {
 		fmt.Println("E:", err)
@@ -75,7 +75,7 @@ func main() {
 
 	// add node #3
 	fmt.Println("==== Adding peer #3 ====")
-	var peer3 = servicedirectory.NewNode("Peer#3")
+	var peer3 = servicedirectory.NewPeer("Peer#3")
 	peer3.Handle(Topic1, func(m string) {
 		fmt.Println("=====>[3]:", m)
 	})
@@ -88,7 +88,7 @@ func main() {
 
 	// add node #4
 	fmt.Println("==== Adding peer #4 ====")
-	var peer4 = servicedirectory.NewNode("Peer#4")
+	var peer4 = servicedirectory.NewPeer("Peer#4")
 	peer4.Handle(Topic1, func(m string) {
 		fmt.Println("=====>[4]:", m)
 	})

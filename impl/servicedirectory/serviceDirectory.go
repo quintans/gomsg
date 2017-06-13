@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/quintans/gomsg"
+	"github.com/quintans/toolkit/log"
 )
 
 const (
@@ -46,6 +47,8 @@ const (
 	// PONG is the reply to a PING request
 	PONG = "PONG"
 )
+
+var logger = log.LoggerFor("github.com/quintans/gomsg/servicedirectory")
 
 // ServiceDirectory tracks all services providers.
 type ServiceDirectory struct {
@@ -79,11 +82,11 @@ func NewServiceDirectory(name string) *ServiceDirectory {
 
 		var provider = dir.providers[c]
 		if provider != nil {
-			fmt.Println("I: < Dir: peer", provider.Endpoint, "exited")
+			logger.Infof("[Dir:OnClose] peer %s exited", provider.Endpoint)
 			delete(dir.providers, c)
 			dir.server.Publish(C_DROPPEER, provider.Endpoint)
 		} else {
-			fmt.Println("I: < Dir: closing connection", c.RemoteAddr(), "for inexistente provider")
+			logger.Debugf("[Dir:OnClose] closing connection %s for inexistente provider", c.RemoteAddr())
 		}
 	}
 	// returns a list of endpoints (addresses) by service
@@ -92,7 +95,7 @@ func NewServiceDirectory(name string) *ServiceDirectory {
 		dir.mu.Lock()
 		var provider = dir.providers[c]
 		if provider != nil {
-			fmt.Println("I: < Dir: S_ADDSERVICE service", provider.Endpoint, "->", service)
+			logger.Infof("[Dir:Handle] S_ADDSERVICE new service %s at %s", service, provider.Endpoint)
 			provider.AddService(service)
 		}
 		dir.mu.Unlock()
@@ -111,7 +114,7 @@ func NewServiceDirectory(name string) *ServiceDirectory {
 		dir.mu.Lock()
 		var provider = dir.providers[c]
 		if provider != nil {
-			fmt.Println("I: < Dir: S_CANCELSERVICE service", provider.Endpoint, "->", service)
+			logger.Infof("[Dir:Handle] S_CANCELSERVICE ignore service %s from %s", service, provider.Endpoint)
 			provider.RemoveService(service)
 		}
 		dir.mu.Unlock()
@@ -127,10 +130,9 @@ func NewServiceDirectory(name string) *ServiceDirectory {
 
 	dir.server.Handle(S_PEERREADY, func(r *gomsg.Request, provider Provider) []*Provider {
 		var c = r.Connection()
-		fmt.Println("I: < Dir: peer", c.RemoteAddr(), " S_PEERREADY:", provider)
-
 		// will be using the IP from where the connection came
 		provider.Endpoint = fmt.Sprintf("%s:%s", c.RemoteAddr().(*net.TCPAddr).IP, provider.Endpoint)
+		logger.Infof("[Dir:Handle] S_PEERREADY peer ready: %+v", provider)
 
 		dir.mu.Lock()
 		defer dir.mu.Unlock()
@@ -185,13 +187,13 @@ func (dir *ServiceDirectory) Listen(addr string) error {
 		return err
 	}
 
-	fmt.Println("I: < Dir: Ping timeout of", dir.PingInterval*time.Duration(dir.PingFailures))
+	logger.Infof("[Dir:Listen] Ping timeout of %s", dir.PingInterval*time.Duration(dir.PingFailures))
 	// keep alive
 	var timeout = gomsg.NewTimeout(dir.PingInterval, dir.PingInterval*time.Duration(dir.PingFailures), func(o interface{}) {
 		if dir != nil && dir.server != nil {
 			c := o.(net.Conn)
 
-			fmt.Println("I: < Dir: Ping timeout. Purging/killing connection from", c.RemoteAddr())
+			logger.Debugf("[Dir:Listen] Ping timeout. Purging/killing connection from %s", c.RemoteAddr())
 			dir.server.Kill(c)
 		}
 	})
@@ -327,7 +329,7 @@ func (node *Node) Connect(bindAddr string, dirAddrs ...string) error {
 		var dir = gomsg.NewClient()
 		node.remoteDirs[k] = dir
 		dir.Handle(C_PEERREADY, func(provider Provider) {
-			fmt.Println("I: > node:", bindAddr, "C_PEERREADY notified of a new peer:", provider)
+			logger.Infof("[Peer:Handle] C_PEERREADY peer %s notified of a new peer: %+v", bindAddr, provider)
 
 			node.mu.Lock()
 
@@ -339,13 +341,13 @@ func (node *Node) Connect(bindAddr string, dirAddrs ...string) error {
 			node.mu.Unlock()
 		})
 		dir.Handle(C_ADDSERVICE, func(service Service) {
+			logger.Infof("[Peer:Handle] C_ADDSERVICE peer %s notified of a new service: %+v", bindAddr, service)
 			node.mu.Lock()
-			fmt.Println("I: > node:", bindAddr, "C_ADDSERVICE notified of a new service:", service)
 			node.addService(service.Name, service.Endpoint)
 			node.mu.Unlock()
 		})
 		dir.Handle(C_CANCELSERVICE, func(service Service) {
-			fmt.Println("I: > node:", bindAddr, "C_CANCELSERVICE notified of canceled service:", service)
+			logger.Infof("[Peer:Handle] C_CANCELSERVICE peer %s notified of a canceled service: %+v", bindAddr, service)
 
 			node.mu.Lock()
 			if endpoints := node.providers[service.Name]; endpoints != nil {
@@ -367,7 +369,7 @@ func (node *Node) Connect(bindAddr string, dirAddrs ...string) error {
 			}
 		})
 		dir.Handle(C_DROPPEER, func(endpoint string) {
-			fmt.Println("I: > node:", bindAddr, "C_DROPPEER peer:", endpoint)
+			logger.Infof("[Peer:Handle] C_DROPPEER peer %s notified of a droped peer: %s", bindAddr, endpoint)
 
 			node.mu.Lock()
 			for _, endpoints := range node.providers {
@@ -394,7 +396,7 @@ func (node *Node) Connect(bindAddr string, dirAddrs ...string) error {
 
 						if _, ok := err.(gomsg.TimeoutError); ok || pong != PONG {
 							retries--
-							fmt.Println("D: > PING failed. retries left:", retries)
+							logger.Debugf("[Peer:Ticker] PING failed. retries left: %d", retries)
 							if retries == 0 {
 								ticker.Stop()
 							}
@@ -497,7 +499,7 @@ func (node *Node) disconnectPeer(peerAddr string) {
 	node.mu.RUnlock()
 
 	if cli != nil {
-		fmt.Println("I: > disconnecting peer:", peerAddr)
+		logger.Debugf("[Peer:disconnectPeer] disconnecting peer: %s", peerAddr)
 
 		// will eventually call OnClose
 		// where it will be removed from peers list
@@ -566,9 +568,7 @@ func (node *Node) lazyConnect(topic string) {
 	var unconnected = make([]string, 0)
 	if endpoints := node.providers[topic]; endpoints != nil {
 		for endpoint := range endpoints {
-			var cli = node.peers[endpoint]
-			if cli == nil {
-				fmt.Println("D: > found unconnect endpoint", endpoint, "for", topic)
+			if cli := node.peers[endpoint]; cli == nil {
 				unconnected = append(unconnected, endpoint)
 			}
 		}
@@ -576,6 +576,7 @@ func (node *Node) lazyConnect(topic string) {
 	node.mu.RUnlock()
 
 	for _, endpoint := range unconnected {
+		logger.Debugf("[Peer:lazyConnect] connecting peer: %s", endpoint)
 		node.connectPeer(endpoint)
 	}
 }

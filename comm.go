@@ -1298,7 +1298,7 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 		this.conn = c
 
 		if this.OnConnect != nil {
-			this.OnConnect(&Wired{c, this.wire})
+			this.OnConnect(NewWired(c, this.wire))
 		}
 	}
 	cherr <- err
@@ -1405,8 +1405,18 @@ func (this *Client) Send(kind EKind, name string, payload interface{}, handler i
 
 // Wired serves as a read only construct to topic handlers
 type Wired struct {
-	conn net.Conn
-	wire *Wire
+	conn            net.Conn
+	wire            *Wire
+	onSendListeners map[uint64]SendListener
+	sendListenerIdx uint64
+}
+
+func NewWired(conn net.Conn, wire *Wire) *Wired {
+	return &Wired{
+		conn:            conn,
+		wire:            wire,
+		onSendListeners: make(map[uint64]SendListener),
+	}
 }
 
 // Conn gets the connection
@@ -1417,6 +1427,47 @@ func (w *Wired) Conn() net.Conn {
 //Wire gets the wire
 func (w *Wired) Wire() *Wire {
 	return w.wire
+}
+
+func (w *Wired) Send(msg Envelope) <-chan error {
+	// fires all registered listeners
+	w.fireSendListener(SendEvent{
+		Kind:    msg.kind,
+		Name:    msg.name,
+		Payload: msg.payload,
+		Handler: msg.handler,
+	})
+	return w.wire.Send(msg)
+}
+
+// AddSendListener adds a listener on send messages (Publis/Push/RequestAll/Request)
+func (this *Wired) AddSendListener(idx uint64, listener SendListener) uint64 {
+	if idx == 0 {
+		idx = atomic.AddUint64(&this.sendListenerIdx, 1)
+	}
+	this.onSendListeners[idx] = listener
+	return idx
+}
+
+// RemoveSendListener removes a previously added listener on send messages
+func (this *Wired) RemoveSendListener(idx uint64) {
+	delete(this.onSendListeners, idx)
+}
+
+func (this *Wired) fireSendListener(event SendEvent) {
+	for _, listener := range this.onSendListeners {
+		listener(event)
+	}
+}
+
+func (this *Wired) Destroy() {
+	this.wire.Destroy()
+	if this.conn != nil {
+		this.conn.Close()
+	}
+	this.conn = nil
+	this.onSendListeners = make(map[uint64]SendListener)
+	atomic.StoreUint64(&this.sendListenerIdx, 0)
 }
 
 // Wires manages a collection of connections as if they were one.
@@ -1508,14 +1559,13 @@ func (this *Wires) Destroy() {
 	defer this.mu.Unlock()
 
 	for _, v := range this.wires {
-		v.wire.Destroy()
-		v.conn.Close()
-		v.conn = nil
+		v.Destroy()
 	}
 	this.wires = make([]*Wired, 0)
 	this.groups = make(map[string]*Group)
 	this.stickies = NewFilter()
 	this.onSendListeners = make(map[uint64]SendListener)
+	atomic.StoreUint64(&this.sendListenerIdx, 0)
 	this.cursor = 0
 }
 
@@ -1533,7 +1583,7 @@ func (this *Wires) Put(conn net.Conn, wire *Wire) *Wired {
 			return v
 		}
 	}
-	wired := &Wired{conn, wire}
+	wired := NewWired(conn, wire)
 	this.wires = append(this.wires, wired)
 	group := this.groups[wire.remoteGroupID]
 	if group == nil {
@@ -1580,9 +1630,7 @@ func (this *Wires) Kill(conn net.Conn) {
 				s.lastWire = nil
 			}
 		}
-		w.wire.Destroy()
-		w.conn.Close()
-		w.conn = nil
+		w.Destroy()
 	}
 
 }
@@ -1757,7 +1805,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 				// does not send to self
 				if skipWire == nil || skipWire != w.wire {
 					// REQ can also receive multiple messages from ONE replier
-					err = <-w.wire.Send(msg)
+					err = <-w.Send(msg)
 					// exit on success
 					if err == nil {
 						break
@@ -1777,7 +1825,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 						w := group.wires[l.Next()]
 						// do not send to self
 						if skipWire == nil || skipWire != w.wire {
-							e := <-w.wire.Send(msg)
+							e := <-w.Send(msg)
 							if e == nil {
 								err = nil
 							}
@@ -1790,7 +1838,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 							w := grp.wires[l.Next()]
 							// do not send to self
 							if skipWire == nil || skipWire != w.wire {
-								e := <-w.wire.Send(msg)
+								e := <-w.Send(msg)
 								// send only to one.
 								// stop if there was a success.
 								if e == nil {
@@ -1839,7 +1887,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 						// increment reply counter
 						logger.Debugf("< [SendSkip] sending message to %s (ungrouped)", w.Conn().RemoteAddr())
 						wg.Add(1)
-						ch := w.wire.Send(msg)
+						ch := w.Send(msg)
 						go func() {
 							// waits for the request completion
 							e := <-ch
@@ -1863,7 +1911,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 						if skipWire == nil || skipWire != w.wire {
 							logger.Debugf("< [SendSkip] sending message to %s (group %s)", w.Conn().RemoteAddr(), id)
 							// waits for the request completion
-							e := <-w.wire.Send(msg)
+							e := <-w.Send(msg)
 							// send only to one.
 							// stop if there was a success.
 							if e == nil {
@@ -2063,7 +2111,7 @@ func (this *Server) Handle(name string, fun interface{}) {
 	l := NewLooper(cursor, len(ws))
 	for l.HasNext() {
 		w := ws[l.Next()]
-		w.wire.Send(msg)
+		w.Send(msg)
 	}
 }
 
@@ -2100,7 +2148,7 @@ func (this *Server) Cancel(name string) {
 	l := NewLooper(cursor, len(ws))
 	for l.HasNext() {
 		w := ws[l.Next()]
-		w.wire.Send(msg)
+		w.Send(msg)
 	}
 }
 

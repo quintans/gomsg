@@ -8,6 +8,8 @@
 // by them when a service(s) change.
 // Service communication is done directly between peer nodes.
 // A peer connects to a service provider (peer) lazily.
+// It is possible to define an idle timeout for connections of a peer. When this timeout is reached the connection
+// is closed and is "parked" for future use.
 // (This network could operate with just one directory node. If this node disapears the network still functions)
 // Everytime a peer changes (add/remove) its provided services it informs the directory
 // and this in turn notifies all other peers of this change.
@@ -273,6 +275,8 @@ type Peer struct {
 	PingInterval time.Duration
 	// PingFailures is the number of times a ping can fail before the peer is considered offline
 	PingFailures int
+	// time that a connection can remain idle, after which is disconnected
+	idleTimeout time.Duration
 }
 
 // NewNode creates a new Node
@@ -304,6 +308,11 @@ func (node *Peer) SetCodec(codec gomsg.Codec) *Peer {
 	node.Codec = codec
 	node.dirs.Codec = codec
 	return node
+}
+
+// SetIdleTimeout sets the interval of time that a connection can remain idle
+func (node *Peer) SetIdleTimeout(timeout time.Duration) {
+	node.idleTimeout = timeout
 }
 
 func (node *Peer) addService(service string, endpoint string) {
@@ -469,7 +478,17 @@ func (node *Peer) connectPeer(peerAddr string) error {
 		cli := gomsg.NewClient().SetCodec(node.Codec)
 
 		cli.OnConnect = func(w *gomsg.Wired) {
-			node.Put(w.Conn(), w.Wire())
+			var wired = node.Put(w.Conn(), w.Wire())
+			if node.idleTimeout > 0 {
+				// disconnect connections idle for more than one minute
+				var debounce = gomsg.NewDebounce(node.idleTimeout, func(o interface{}) {
+					logger.Infof("Peer:Idle] Closing idle connection from %s to %s", node.name, peerAddr)
+					node.Kill(w.Conn())
+				})
+				wired.AddSendListener(0, func(event gomsg.SendEvent) {
+					debounce.Delay(w.Conn())
+				})
+			}
 		}
 		cli.OnClose = func(c net.Conn) {
 			node.Kill(c)
@@ -576,7 +595,7 @@ func (node *Peer) lazyConnect(topic string) {
 	node.mu.RUnlock()
 
 	for _, endpoint := range unconnected {
-		logger.Debugf("[Peer:lazyConnect] connecting peer: %s", endpoint)
+		logger.Infof("[Peer:lazyConnect] connecting peer: %s", endpoint)
 		node.connectPeer(endpoint)
 	}
 }

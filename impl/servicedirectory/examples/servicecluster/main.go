@@ -39,6 +39,7 @@ func main() {
 
 	fmt.Println("==== Adding peer #1 ====")
 	var peer1 = servicedirectory.NewPeer("Peer#1")
+	peer1.SetIdleTimeout(time.Second * 3)
 	err = peer1.Connect(":6001", dirs...)
 	if err != nil {
 		fmt.Println("E:", err)

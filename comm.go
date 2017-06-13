@@ -191,13 +191,13 @@ func (this Response) EndMark() bool {
 type Request struct {
 	Response
 
-	request   []byte
+	payload   []byte
 	writer    *bytes.Buffer
 	terminate bool
 
 	// If an handler doesn't define a return type (error, whatever) and define an input of
-	// type gomsg.Request the reply will not be sent until we call gomsg.Request.SendAs().
-	// This is used to route messages (comm.Route) from server to server
+	// type gomsg.Request the reply will not be sent until we call gomsg.Request.ReplyAs().
+	// This is used to route messages (gomsg.Route) from server to server
 	deferReply bool
 }
 
@@ -214,7 +214,7 @@ func NewRequest(wire *Wire, c net.Conn, msg Envelope) *Request {
 				sequence: msg.sequence,
 			},
 		},
-		request: msg.payload,
+		payload: msg.payload,
 	}
 
 	return ctx
@@ -227,8 +227,8 @@ func (this *Request) reset() {
 	this.terminate = false
 }
 
-func (this *Request) Request() []byte {
-	return this.request
+func (this *Request) Payload() []byte {
+	return this.payload
 }
 
 func (this *Request) Writer() *OutputStream {
@@ -256,6 +256,12 @@ func (this *Request) Reply() []byte {
 	return this.reply
 }
 
+// DeferReply indicates that the reply won't be sent immediatly.
+// The reply will eventually be sent by calling with gomsg.Request.ReplyAs().
+func (this *Request) DeferReply() {
+	this.deferReply = true
+}
+
 // Terminate terminates a series of replies by sending an ACK message to the caller.
 // It can also be used to reject a request, since this terminates the request without sending a reply payload.
 func (this *Request) Terminate() {
@@ -265,7 +271,7 @@ func (this *Request) Terminate() {
 
 // sets a multi reply (REQ_PARTIAL)
 func (this *Request) SendReply(reply []byte) {
-	this.SendAs(REP_PARTIAL, reply)
+	this.ReplyAs(REP_PARTIAL, reply)
 }
 
 // sets a multi reply error (ERR_PARTIAL)
@@ -277,10 +283,10 @@ func (this *Request) SendFault(err error) {
 	} else {
 		reply = []byte(err.Error())
 	}
-	this.SendAs(ERR_PARTIAL, reply)
+	this.ReplyAs(ERR_PARTIAL, reply)
 }
 
-func (this *Request) SendAs(kind EKind, reply []byte) {
+func (this *Request) ReplyAs(kind EKind, reply []byte) {
 	this.wire.reply(kind, this.sequence, reply)
 }
 
@@ -332,7 +338,7 @@ type Wire struct {
 	callbacks map[uint32]chan Response
 
 	disconnected func(net.Conn, error)
-	findHandler  func(name string) func(ctx *Request)
+	findHandlers func(name string) []func(ctx *Request)
 
 	mutop         sync.RWMutex
 	remoteGroupID string // it is used for High Availability
@@ -663,7 +669,10 @@ func (this *Wire) reader(c net.Conn) {
 				// reply was an error
 				var s string
 				if this.codec != nil {
-					this.codec.Decode(data, &s)
+					var e = this.codec.Decode(data, &s)
+					if e != nil {
+						panic(fmt.Sprintf("[reader] Unable to decode %s; cause=%s", data, e))
+					}
 					data = []byte(s)
 				}
 				last = kind == ERR
@@ -698,18 +707,34 @@ func (this *Wire) runHandler() {
 			// Serve
 			var reply []byte
 			var err error
-			handler := this.findHandler(msg.name)
 			var deferReply bool
 			var terminate bool
-			if handler != nil {
-				ctx := NewRequest(this, c, msg)
-				handler(ctx) // this resets payload
-				terminate = ctx.terminate
-				deferReply = ctx.deferReply
-				if ctx.Fault() != nil {
-					err = ctx.Fault() // single fault
-				} else {
-					reply = ctx.Reply() // single reply
+			var handlers = this.findHandlers(msg.name)
+			if len(handlers) > 0 {
+				var req = NewRequest(this, c, msg)
+				for _, hnd := range handlers {
+					hnd(req)
+					// if there is any handler that terminates,
+					// there will be no reply
+					if req.terminate {
+						terminate = true
+					}
+					// if there is at least one handler with gomsg.Request
+					// there will be no explicit reply,
+					if req.deferReply {
+						deferReply = true
+						reply = nil
+					}
+					if req.Fault() != nil {
+						err = req.Fault() // single fault
+						reply = nil
+						break
+					} else if !deferReply {
+						reply = req.Reply() // single reply
+					}
+					// reset
+					req.terminate = false
+					req.deferReply = false
 				}
 			} else {
 				err = UnknownTopic(faults.New(UNKNOWNTOPIC, msg.name))
@@ -732,10 +757,10 @@ func (this *Wire) runHandler() {
 				this.reply(msg.kind, msg.sequence, reply)
 			}
 		} else { // PUSH & PUB
-			handler := this.findHandler(msg.name)
+			var handlers = this.findHandlers(msg.name)
 
 			if msg.kind == PUSH {
-				if handler != nil {
+				if len(handlers) > 0 {
 					msg.kind = ACK
 				} else {
 					msg.kind = NACK
@@ -743,8 +768,11 @@ func (this *Wire) runHandler() {
 				this.reply(msg.kind, msg.sequence, nil)
 			}
 
-			if handler != nil {
-				handler(NewRequest(this, c, msg))
+			if len(handlers) > 0 {
+				var req = NewRequest(this, c, msg)
+				for _, handler := range handlers {
+					handler(req)
+				}
 			}
 		}
 	}
@@ -809,7 +837,10 @@ func createReplyHandler(codec Codec, fun interface{}) func(ctx Response) {
 		if payloadType != nil {
 			if codec != nil && ctx.reply != nil {
 				p = reflect.New(payloadType)
-				codec.Decode(ctx.reply, p.Interface())
+				var e = codec.Decode(ctx.reply, p.Interface())
+				if e != nil {
+					panic(fmt.Sprintf("[deserializeHandshake] Unable to decode %s; cause=%s", ctx.reply, e))
+				}
 				params = append(params, p.Elem())
 			} else {
 				// when the codec is nil the data is sent as is
@@ -866,23 +897,26 @@ func createRequestHandler(codec Codec, fun interface{}) func(ctx *Request) {
 		panic("In a two return values functions the second value must be an error.")
 	}
 
-	return func(ctx *Request) {
+	return func(req *Request) {
 		var p reflect.Value
 		var params = make([]reflect.Value, 0)
 		if hasContext {
-			params = append(params, reflect.ValueOf(ctx))
+			params = append(params, reflect.ValueOf(req))
 		}
 		if payloadType != nil {
-			if codec != nil && ctx.request != nil {
+			if codec != nil && req.payload != nil {
 				p = reflect.New(payloadType)
-				codec.Decode(ctx.request, p.Interface())
+				var e = codec.Decode(req.payload, p.Interface())
+				if e != nil {
+					panic(fmt.Sprintf("[deserializeHandshake] Unable to decode %s; cause=%s", req.payload, e))
+				}
 				params = append(params, p.Elem())
 			} else {
 				// when the codec is nil the data is sent as is
-				if ctx.request == nil {
+				if req.payload == nil {
 					params = append(params, reflect.Zero(payloadType))
 				} else {
-					params = append(params, reflect.ValueOf(ctx.request))
+					params = append(params, reflect.ValueOf(req.payload))
 				}
 			}
 		}
@@ -915,26 +949,59 @@ func createRequestHandler(codec Codec, fun interface{}) func(ctx *Request) {
 			}
 
 			if err != nil {
-				ctx.SetFault(err)
+				req.SetFault(err)
 			} else {
-				ctx.SetReply(result)
+				req.SetReply(result)
 			}
-		} else if hasContext {
-			// only if the handler has an input of type gomsg.Request we can defer the reply,
-			// because only with gomsg.Request.SendAs() we can reply
-			ctx.deferReply = true
 		}
 	}
 }
 
+type handler struct {
+	rule string
+	call func(*Request)
+}
+
 type ClientServer struct {
 	muhnd    sync.RWMutex
-	handlers map[string]func(ctx *Request)
+	handlers []handler
 
 	timeout   time.Duration
 	muconn    sync.RWMutex
 	OnConnect func(w *Wired)
 	OnClose   func(c net.Conn)
+}
+
+func (this *ClientServer) removeHandler(name string) {
+	this.muhnd.Lock()
+	defer this.muhnd.Unlock()
+
+	var a = this.handlers
+	for i, v := range a {
+		if v.rule == name {
+			copy(a[i:], a[i+1:])
+			a[len(a)-1] = handler{} // avoid memory leak
+			this.handlers = a[:len(a)-1]
+			return
+		}
+	}
+
+	this.muhnd.Unlock()
+}
+
+func (this *ClientServer) addHandler(name string, hnd func(*Request)) {
+	this.muhnd.Lock()
+	defer this.muhnd.Unlock()
+
+	for k, v := range this.handlers {
+		if v.rule == name {
+			this.handlers[k].call = hnd
+			return
+		}
+	}
+
+	this.handlers = append(this.handlers, handler{name, hnd})
+
 }
 
 // SetTimeout sets the timeout used to send data
@@ -993,13 +1060,13 @@ func NewClient() *Client {
 		reconnectMaxInterval: 0,
 	}
 	this.timeout = time.Second * 10
-	this.handlers = make(map[string]func(ctx *Request))
+	this.handlers = make([]handler, 0)
 
-	this.wire.findHandler = func(name string) func(ctx *Request) {
+	this.wire.findHandlers = func(name string) []func(ctx *Request) {
 		this.muhnd.RLock()
 		defer this.muhnd.RUnlock()
 
-		return findHandler(name, this.handlers)
+		return findHandlers(name, this.handlers)
 	}
 
 	this.wire.disconnected = func(c net.Conn, e error) {
@@ -1058,8 +1125,8 @@ func (this *Client) handshake(c net.Conn) error {
 	var payload = make([]string, size)
 	payload[0] = this.wire.localGroupID
 	i := 1
-	for k := range this.handlers {
-		payload[i] = k
+	for _, v := range this.handlers {
+		payload[i] = v.rule
 		i++
 	}
 	this.muhnd.RUnlock()
@@ -1124,7 +1191,11 @@ func deserializeHandshake(c net.Conn, codec Codec, timeout time.Duration) (strin
 	}
 	var topics []string
 	if codec != nil {
-		codec.Decode(data, &topics)
+		var e = codec.Decode(data, &topics)
+		if e != nil {
+			panic(fmt.Sprintf("[deserializeHandshake] Unable to decode %s; cause=%s", data, e))
+		}
+
 	} else {
 		var buf = bytes.NewBuffer(data)
 		is := NewInputStream(buf)
@@ -1242,13 +1313,11 @@ func (this *Client) Connection() net.Conn {
 // When handling request messages, the function handler can have a return value and/or an error.
 // When handling publish/push messages, any return from the function handler is discarded.
 // When handling Request/RequestAll messages, if a return is not specified,
-// the caller will not receive a reply until you explicitly call gomsg.Request.SendAs()
+// the caller will not receive a reply until you explicitly call gomsg.Request.ReplyAs()
 func (this *Client) Handle(name string, fun interface{}) {
-	handler := createRequestHandler(this.wire.codec, fun)
+	hnd := createRequestHandler(this.wire.codec, fun)
 
-	this.muhnd.Lock()
-	this.handlers[name] = handler
-	this.muhnd.Unlock()
+	this.addHandler(name, hnd)
 
 	this.muconn.Lock()
 	defer this.muconn.Unlock()
@@ -1260,9 +1329,7 @@ func (this *Client) Handle(name string, fun interface{}) {
 }
 
 func (this *Client) Cancel(name string) {
-	this.muhnd.Lock()
-	delete(this.handlers, name)
-	this.muhnd.Unlock()
+	this.removeHandler(name)
 
 	this.muconn.Lock()
 	defer this.muconn.Unlock()
@@ -1770,6 +1837,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 					// do not send to self
 					if skipWire == nil || skipWire != w.wire {
 						// increment reply counter
+						logger.Debugf("< [SendSkip] sending message to %s (ungrouped)", w.Conn().RemoteAddr())
 						wg.Add(1)
 						ch := w.wire.Send(msg)
 						go func() {
@@ -1793,6 +1861,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 						w := grp.wires[l.Next()]
 						// do not send to self
 						if skipWire == nil || skipWire != w.wire {
+							logger.Debugf("< [SendSkip] sending message to %s (group %s)", w.Conn().RemoteAddr(), id)
 							// waits for the request completion
 							e := <-w.wire.Send(msg)
 							// send only to one.
@@ -1833,7 +1902,7 @@ func NewServer() *Server {
 	server := new(Server)
 	server.Wires = NewWires(JsonCodec{})
 	server.timeout = time.Second * 10
-	server.handlers = make(map[string]func(ctx *Request))
+	server.handlers = make([]handler, 0)
 	return server
 }
 
@@ -1866,7 +1935,7 @@ func (this *Server) Listen(service string) error {
 			logger.Debugf("< [Listen] accepted connection from %s", c.RemoteAddr())
 
 			wire := NewWire(this.Codec)
-			wire.findHandler = this.findHandler
+			wire.findHandlers = this.findHandlers
 
 			// topic exchange
 			group, remoteTopics, err := this.handshake(c, wire)
@@ -1931,8 +2000,8 @@ func (this *Server) handshake(c net.Conn, wire *Wire) (string, map[string]bool, 
 	var topics = make([]string, size)
 	topics[0] = wire.localGroupID
 	i := 1
-	for k := range this.handlers {
-		topics[i] = k
+	for _, v := range this.handlers {
+		topics[i] = v.rule
 		i++
 	}
 	this.muhnd.RUnlock()
@@ -1945,27 +2014,28 @@ func (this *Server) handshake(c net.Conn, wire *Wire) (string, map[string]bool, 
 	return group, payload, nil
 }
 
-func (this *Server) findHandler(name string) func(c *Request) {
+func (this *Server) findHandlers(name string) []func(c *Request) {
 	this.muhnd.RLock()
 	defer this.muhnd.RUnlock()
 
-	return findHandler(name, this.handlers)
+	return findHandlers(name, this.handlers)
 }
 
 // find the first match
-func findHandler(name string, handlers map[string]func(ctx *Request)) func(c *Request) {
+func findHandlers(name string, handler []handler) []func(c *Request) {
+	var funcs = make([]func(c *Request), 0)
 	var prefix string
-	for k, v := range handlers {
-		if strings.HasSuffix(k, FILTER_TOKEN) {
-			prefix = k[:len(k)-1]
+	for _, v := range handler {
+		if strings.HasSuffix(v.rule, FILTER_TOKEN) {
+			prefix = v.rule[:len(v.rule)-1]
 			if strings.HasPrefix(name, prefix) {
-				return v
+				funcs = append(funcs, v.call)
 			}
-		} else if name == k {
-			return v
+		} else if name == v.rule {
+			funcs = append(funcs, v.call)
 		}
 	}
-	return nil
+	return funcs
 }
 
 // Destroy closes all connections and the listener
@@ -1982,13 +2052,11 @@ func (this *Server) Destroy() {
 // When handling request messages, the function handler can have a return value and/or an error.
 // When handling publish/push messages, any return from the function handler is discarded.
 // When handling Request/RequestAll messages, if a return is not specified,
-// the caller will not receive a reply until you explicitly call gomsg.Request.SendAs()
+// the caller will not receive a reply until you explicitly call gomsg.Request.ReplyAs()
 func (this *Server) Handle(name string, fun interface{}) {
-	handler := createRequestHandler(this.Codec, fun)
+	hnd := createRequestHandler(this.Codec, fun)
 
-	this.muhnd.Lock()
-	this.handlers[name] = handler
-	this.muhnd.Unlock()
+	this.addHandler(name, hnd)
 
 	msg, _ := createEnvelope(SUB, name, nil, nil, this.timeout, this.Codec)
 	ws, cursor := this.Wires.GetAll()
@@ -2005,7 +2073,7 @@ func (this *Server) Handle(name string, fun interface{}) {
 func (this *Server) Route(name string, timeout time.Duration, before func(x *Request) bool, after func(x *Response)) {
 	// This handle is called by the wire.
 	// Since this handler has no declared return type, upon return no data will be sent to the caller.
-	// Eventually the reply must be sent or a time will occur.
+	// Eventually the reply must be sent or a timeout will occur.
 	this.Handle(name, func(r *Request) {
 		// decide if it should continue (and do other thinhs like store the request data).
 		if before != nil && !before(r) {
@@ -2013,7 +2081,7 @@ func (this *Server) Route(name string, timeout time.Duration, before func(x *Req
 		}
 
 		wire := r.wire
-		this.SendSkip(wire, r.Kind, r.Name, r.Request(), func(resp Response) {
+		this.SendSkip(wire, r.Kind, r.Name, r.Payload(), func(resp Response) {
 			if after != nil {
 				// do something (ex: store the response data)
 				after(&resp)
@@ -2025,9 +2093,7 @@ func (this *Server) Route(name string, timeout time.Duration, before func(x *Req
 }
 
 func (this *Server) Cancel(name string) {
-	this.muhnd.Lock()
-	delete(this.handlers, name)
-	this.muhnd.Unlock()
+	this.removeHandler(name)
 
 	msg, _ := createEnvelope(UNSUB, name, nil, nil, this.timeout, this.Codec)
 	ws, cursor := this.Wires.GetAll()
@@ -2054,28 +2120,55 @@ func test(t EKind, values ...EKind) bool {
 	return false
 }
 
-type Duplexer interface {
+type Handler interface {
 	Handle(name string, fun interface{})
+}
+
+type Sender interface {
 	Send(kind EKind, name string, payload interface{}, handler interface{}, timeout time.Duration) <-chan error
 }
 
-var _ Duplexer = &Client{}
-var _ Duplexer = &Server{}
+var _ Handler = &Client{}
+var _ Handler = &Server{}
+var _ Sender = &Client{}
+var _ Sender = &Server{}
 
 // Route messages between to different binding ports.
-func Route(name string, src Duplexer, dest Duplexer, relayTimeout time.Duration, before func(c *Request) bool, after func(c *Response)) {
+func Route(name string, src Handler, dest Sender, relayTimeout time.Duration, before func(c *Request) bool, after func(c *Response)) {
 	src.Handle(name, func(req *Request) {
 		if before != nil && !before(req) {
 			return
 		}
 
-		dest.Send(req.Kind, req.Name, req.Request(), func(resp Response) {
+		/*
+			There are two ways of doing the following code. Either one is fine (need to test more).
+			The first one, implemented here, we wait for the completion of dest.Send() with <-.
+			The second one, the commented code, we don't wait with <-
+			and we defer the reply with req.DeferReply(),
+			and then we send the reply when it comes with req.ReplyAs().
+		*/
+		// (1rst)
+		var kind EKind
+		var reply []byte
+		// (1rst)
+		<-dest.Send(req.Kind, req.Name, req.Payload(), func(resp Response) {
 			if after != nil {
 				after(&resp)
 			}
 
-			req.SendAs(resp.Kind, resp.Reply())
+			// (1rst)
+			kind = resp.Kind
+			reply = resp.Reply()
+
+			// (2nd)
+			//req.ReplyAs(resp.Kind, resp.Reply())
 		}, relayTimeout)
+
+		// (1rst)
+		req.ReplyAs(kind, reply)
+
+		// (2nd)
+		//req.DeferReply()
 	})
 
 }

@@ -15,7 +15,7 @@ const (
 )
 
 func wait() {
-	time.Sleep(time.Millisecond * 10)
+	time.Sleep(time.Millisecond * 200)
 }
 
 func main() {
@@ -67,6 +67,7 @@ func main() {
 	fmt.Println("====== PUB example =======")
 	peer1.Publish(Topic1, test)
 	wait()
+
 	if test != result {
 		fmt.Println("E: ===> ERROR: expected", test, "but got", result)
 		os.Exit(1)
@@ -127,42 +128,42 @@ func main() {
 
 	var size = len(peer1.Endpoints(Topic1))
 	if size != 3 {
-		fmt.Println("E: ===> ERROR: expected 3 endpoint for peer1, got", size)
+		fmt.Println("E: ===> ERROR: expected 3 endpoint for peer1(Topic1), got", size)
 		os.Exit(1)
 	}
 	size = len(peer2.Endpoints(Topic1))
 	if size != 2 {
-		fmt.Println("E: ===> ERROR: expected 2 endpoint for peer2, got", size)
+		fmt.Println("E: ===> ERROR: expected 2 endpoint for peer2(Topic1), got", size)
 		os.Exit(1)
 	}
 	size = len(peer3.Endpoints(Topic1))
 	if size != 2 {
-		fmt.Println("E: ===> ERROR: expected 2 endpoint for peer3, got", size)
+		fmt.Println("E: ===> ERROR: expected 2 endpoint for peer3(Topic1), got", size)
 		os.Exit(1)
 	}
 	size = len(peer4.Endpoints(Topic1))
 	if size != 2 {
-		fmt.Println("E: ===> ERROR: expected 2 endpoint for peer4, got", size)
+		fmt.Println("E: ===> ERROR: expected 2 endpoint for peer4(Topic1), got", size)
 		os.Exit(1)
 	}
 	size = len(peer1.Endpoints(Topic2))
 	if size != 3 {
-		fmt.Println("E: ===> ERROR: expected 3 endpoint for peer1, got", size)
+		fmt.Println("E: ===> ERROR: expected 3 endpoint for peer1(Topic2), got", size)
 		os.Exit(1)
 	}
 	size = len(peer2.Endpoints(Topic2))
 	if size != 2 {
-		fmt.Println("E: ===> ERROR: expected 2 endpoint for peer2, got", size)
+		fmt.Println("E: ===> ERROR: expected 2 endpoint for peer2(Topic2), got", size)
 		os.Exit(1)
 	}
 	size = len(peer3.Endpoints(Topic2))
 	if size != 2 {
-		fmt.Println("E: ===> ERROR: expected 2 endpoint for peer3, got", size)
+		fmt.Println("E: ===> ERROR: expected 2 endpoint for peer3(Topic2), got", size)
 		os.Exit(1)
 	}
 	size = len(peer4.Endpoints(Topic2))
 	if size != 2 {
-		fmt.Println("E: ===> ERROR: expected 2 endpoint for peer4, got", size)
+		fmt.Println("E: ===> ERROR: expected 2 endpoint for peer4(Topic2), got", size)
 		os.Exit(1)
 	}
 

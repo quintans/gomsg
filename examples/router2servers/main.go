@@ -23,7 +23,7 @@ func main() {
 	// all (*) messages arriving to server 1 are routed to server 2
 	gomsg.Route("*", server1, server2, time.Second,
 		func(ctx *gomsg.Request) bool {
-			fmt.Println("===>routing incoming msg:", string(ctx.Request()))
+			fmt.Println("[*] ===>routing incoming msg:", string(ctx.Payload()))
 			return true
 		},
 		nil)
@@ -35,9 +35,9 @@ func main() {
 	cli2 := gomsg.NewClient()
 	cli2.Handle("HELLO", func(ctx *gomsg.Request, m string) (string, error) {
 		if m != MESSAGE {
-			fmt.Printf("###> EXPECTED '%s'. RECEIVED '%s'.\n", MESSAGE, m)
+			fmt.Printf("[2] ###> EXPECTED '%s'. RECEIVED '%s'.\n", MESSAGE, m)
 		}
-		fmt.Println("<=== processing:", m, "from", ctx.Connection().RemoteAddr())
+		fmt.Println("[2] <=== processing:", m, "from", ctx.Connection().RemoteAddr())
 		return fmt.Sprintf("Hello %s", m), nil
 	})
 	// client 2 connects to server 2
@@ -52,9 +52,9 @@ func main() {
 	*/
 	err = <-cli.Request("HELLO", MESSAGE, func(ctx gomsg.Response, r string, e error) {
 		if r != REPLY {
-			fmt.Printf("###> EXPECTED '%s'. RECEIVED '%s'.\n", REPLY, r)
+			fmt.Printf("[1] ###> EXPECTED '%s'. RECEIVED '%s'.\n", REPLY, r)
 		}
-		fmt.Println("=================> reply:", r, e, "from", ctx.Connection().RemoteAddr())
+		fmt.Println("[1] =================> reply:", r, e, "from", ctx.Connection().RemoteAddr())
 	})
 	if err != nil {
 		fmt.Println("===> error:", err)

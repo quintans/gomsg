@@ -1,10 +1,13 @@
 // THIS IS A WORK IN PROGRESS
 //
-// This file demonstrates the use o gomsg to build a netwok of services.
-// We have peer nodes and directory nodes.
-// Peer are nodes that provide and/or consume services.
-// Data communication is made directly between peer nodes.
+// This code demonstrates the use o gomsg to build a netwok of services.
+// We have directory nodes and peer nodes.
 // Directory nodes (one or more) is where the peers register the services that they provide.
+// Peer nodes provide and/or consume services.
+// All peers are connected to the directory node(s). Peer nodes inform the directory nodes and are informed by
+// by them when a service(s) change.
+// Service communication is done directly between peer nodes.
+// A peer connects to a service provider (peer) lazily.
 // (This network could operate with just one directory node. If this node disapears the network still functions)
 // Everytime a peer changes (add/remove) its provided services it informs the directory
 // and this in turn notifies all other peers of this change.
@@ -124,7 +127,7 @@ func NewServiceDirectory(name string) *ServiceDirectory {
 
 	dir.server.Handle(S_PEERREADY, func(r *gomsg.Request, provider Provider) []*Provider {
 		var c = r.Connection()
-		fmt.Println("< Dir: peer", c.RemoteAddr(), " S_PEERREADY:", provider)
+		fmt.Println("I: < Dir: peer", c.RemoteAddr(), " S_PEERREADY:", provider)
 
 		// will be using the IP from where the connection came
 		provider.Endpoint = fmt.Sprintf("%s:%s", c.RemoteAddr().(*net.TCPAddr).IP, provider.Endpoint)
@@ -133,10 +136,10 @@ func NewServiceDirectory(name string) *ServiceDirectory {
 		defer dir.mu.Unlock()
 
 		// Creates a shallow copy of all existing providers
-		var copy = make([]*Provider, len(dir.providers))
+		var tmp = make([]*Provider, len(dir.providers))
 		var i = 0
 		for _, v := range dir.providers {
-			copy[i] = v
+			tmp[i] = v
 			i++
 		}
 
@@ -147,7 +150,7 @@ func NewServiceDirectory(name string) *ServiceDirectory {
 		var w = dir.server.Get(c)
 		dir.server.SendSkip(w.Wire(), gomsg.REQALL, C_PEERREADY, provider, nil, time.Second)
 
-		return copy
+		return tmp
 	})
 
 	dir.SetCodec(gomsg.JsonCodec{})
@@ -169,7 +172,10 @@ func (dir *ServiceDirectory) Name() string {
 func (dir *ServiceDirectory) Destroy() {
 	dir.server.Destroy()
 	dir.server = nil
+
+	dir.mu.Lock()
 	dir.providers = nil
+	dir.mu.Unlock()
 }
 
 // Listen starts ServiceDirectory listening for incoming connections
@@ -179,6 +185,7 @@ func (dir *ServiceDirectory) Listen(addr string) error {
 		return err
 	}
 
+	fmt.Println("I: < Dir: Ping timeout of", dir.PingInterval*time.Duration(dir.PingFailures))
 	// keep alive
 	var timeout = gomsg.NewTimeout(dir.PingInterval, dir.PingInterval*time.Duration(dir.PingFailures), func(o interface{}) {
 		if dir != nil && dir.server != nil {
@@ -195,7 +202,6 @@ func (dir *ServiceDirectory) Listen(addr string) error {
 	// reply to pings and delays the timeout
 	dir.server.Handle(PING, func(r *gomsg.Request) string {
 		timeout.Delay(r.Connection())
-
 		return PONG
 	})
 
@@ -302,9 +308,9 @@ func (node *Node) addService(service string, endpoint string) {
 	var endpoints map[string]bool
 	if endpoints = node.providers[service]; endpoints == nil {
 		endpoints = make(map[string]bool)
+		node.providers[service] = endpoints
 	}
 	endpoints[endpoint] = true
-	node.providers[service] = endpoints
 }
 
 // Connect binds a to a local address to provide services
@@ -333,9 +339,8 @@ func (node *Node) Connect(bindAddr string, dirAddrs ...string) error {
 			node.mu.Unlock()
 		})
 		dir.Handle(C_ADDSERVICE, func(service Service) {
-			fmt.Println("I: > node:", bindAddr, "C_ADDSERVICE notified of a new service:", service)
-
 			node.mu.Lock()
+			fmt.Println("I: > node:", bindAddr, "C_ADDSERVICE notified of a new service:", service)
 			node.addService(service.Name, service.Endpoint)
 			node.mu.Unlock()
 		})
@@ -365,7 +370,9 @@ func (node *Node) Connect(bindAddr string, dirAddrs ...string) error {
 			fmt.Println("I: > node:", bindAddr, "C_DROPPEER peer:", endpoint)
 
 			node.mu.Lock()
-			delete(node.providers, endpoint)
+			for _, endpoints := range node.providers {
+				delete(endpoints, endpoint)
+			}
 			node.mu.Unlock()
 
 			node.disconnectPeer(endpoint)
@@ -383,7 +390,7 @@ func (node *Node) Connect(bindAddr string, dirAddrs ...string) error {
 						var pong = ""
 						var err = <-dir.RequestTimeout(PING, nil, func(ctx gomsg.Response, reply string) {
 							pong = reply
-						}, time.Millisecond*10)
+						}, time.Millisecond*50)
 
 						if _, ok := err.(gomsg.TimeoutError); ok || pong != PONG {
 							retries--
@@ -575,14 +582,15 @@ func (node *Node) lazyConnect(topic string) {
 
 // Endpoints returns the list of endpoints for a topic/service
 func (node *Node) Endpoints(topic string) []string {
-	node.mu.RLock()
-	defer node.mu.RUnlock()
-
 	var tmp = make([]string, 0)
+
+	node.mu.RLock()
 	if endpoints := node.providers[topic]; endpoints != nil {
 		for endpoint := range endpoints {
 			tmp = append(tmp, endpoint)
 		}
 	}
+	node.mu.RUnlock()
+
 	return tmp
 }

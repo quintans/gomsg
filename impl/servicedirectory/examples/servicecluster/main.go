@@ -18,9 +18,11 @@ func wait() {
 	time.Sleep(time.Millisecond * 200)
 }
 
-func main() {
-	log.Register("/", log.INFO)
+func init() {
+	log.Register("/", log.INFO).ShowCaller(true)
+}
 
+func main() {
 	var dir1 = servicedirectory.NewDirectory("DIR#1")
 	var err = dir1.Listen(":7001")
 	if err != nil {
@@ -194,10 +196,9 @@ func main() {
 	fmt.Println("====== Drop DIR #2 =======")
 	dir2.Destroy() // removed from the cluster
 
-	time.Sleep(time.Second * 2) // are there any requests pending?
-
 	fmt.Println("====== Drop Peer #2 =======")
 	peer2.Destroy() // removed from the cluster
 
-	time.Sleep(time.Second * 5) // provoques peer2 timeout purge
+	fmt.Println("Waiting for timeouts...")
+	time.Sleep(time.Second * 3) // provoques peer2 timeout purge
 }

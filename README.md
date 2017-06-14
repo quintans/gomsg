@@ -5,7 +5,7 @@ Building blocks for message networks solutions in Go
 
 This is a **WORK IN PROGRESS**.
 
-This is an exercise to see what I could do in Go 
+This is an exercise to see what I could do in Go
 regarding networking and also to learn a bit more about Go.
 
 The idea is that one client endpoint connects to a server endpoint,
@@ -37,7 +37,7 @@ type Sample struct {
 ```go
 // create server
 var server = gomsg.NewServer()
-// we can handler messages in the server or in the client
+// we can handle messages in the server or in the client
 server.Handle("TELEMETRY", func(data Sample) {
     fmt.Printf("received %+v\n", data)
 })

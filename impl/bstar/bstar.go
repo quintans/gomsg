@@ -196,7 +196,7 @@ func (this *BStar) Start() {
 	for {
 		select {
 		case <-this.quit:
-			break //  Context has been shut down
+			return //  Context has been shut down
 		case <-time.After(HEARTBEAT):
 			//  If we timed out, send state to peer
 			msg := gomsg.NewMsg()

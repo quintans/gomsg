@@ -103,9 +103,8 @@ func NewDirectory(name string) *Directory {
 		dir.mu.Unlock()
 
 		if provider != nil {
-			var w = dir.server.Get(c)
-			// notifies all nodes, but caller
-			dir.server.SendSkip(w.Wire(), gomsg.REQALL, C_ADDSERVICE, Service{provider.Endpoint, service}, nil, time.Second)
+			// notifies all peers, but the caller
+			dir.notifyPeers(c, C_ADDSERVICE, Service{provider.Endpoint, service})
 		}
 
 		return nil
@@ -122,9 +121,8 @@ func NewDirectory(name string) *Directory {
 		dir.mu.Unlock()
 
 		if provider != nil {
-			var w = dir.server.Get(c)
-			// notifies all nodes, but caller
-			dir.server.SendSkip(w.Wire(), gomsg.REQALL, C_CANCELSERVICE, Service{provider.Endpoint, service}, nil, time.Second)
+			// notifies all peers, but the caller
+			dir.notifyPeers(c, C_CANCELSERVICE, Service{provider.Endpoint, service})
 		}
 
 		return nil
@@ -151,14 +149,19 @@ func NewDirectory(name string) *Directory {
 		dir.providers[c] = &provider
 
 		// notifies all peers, but the caller
-		var w = dir.server.Get(c)
-		dir.server.SendSkip(w.Wire(), gomsg.REQALL, C_PEERREADY, provider, nil, time.Second)
+		dir.notifyPeers(c, C_PEERREADY, provider)
 
 		return tmp
 	})
 
 	dir.SetCodec(gomsg.JsonCodec{})
 	return dir
+}
+
+// notifyPeers notifies all peers, but the caller
+func (dir *Directory) notifyPeers(c net.Conn, topic string, payload interface{}) {
+	var self = dir.server.Get(c).Wire()
+	dir.server.SendSkip(self, gomsg.REQALL, topic, payload, nil, time.Second)
 }
 
 // SetCodec sets the codec

@@ -84,11 +84,11 @@ func NewDirectory(name string) *Directory {
 
 		var provider = dir.providers[c]
 		if provider != nil {
-			logger.Infof("[Dir:OnClose] peer %s exited", provider.Endpoint)
+			logger.Infof("[Dir:OnClose] %s: peer %s exited", dir.name, provider.Endpoint)
 			delete(dir.providers, c)
 			dir.server.Publish(C_DROPPEER, provider.Endpoint)
 		} else {
-			logger.Debugf("[Dir:OnClose] closing connection %s for inexistente provider", c.RemoteAddr())
+			logger.Debugf("[Dir:OnClose] %s: closing connection %s for inexistente provider", dir.name, c.RemoteAddr())
 		}
 	}
 	// returns a list of endpoints (addresses) by service
@@ -97,7 +97,7 @@ func NewDirectory(name string) *Directory {
 		dir.mu.Lock()
 		var provider = dir.providers[c]
 		if provider != nil {
-			logger.Infof("[Dir:Handle] S_ADDSERVICE new service %s at %s", service, provider.Endpoint)
+			logger.Infof("[Dir:Handle] %s: S_ADDSERVICE new service %s at %s", dir.name, service, provider.Endpoint)
 			provider.AddService(service)
 		}
 		dir.mu.Unlock()
@@ -116,7 +116,7 @@ func NewDirectory(name string) *Directory {
 		dir.mu.Lock()
 		var provider = dir.providers[c]
 		if provider != nil {
-			logger.Infof("[Dir:Handle] S_CANCELSERVICE ignore service %s from %s", service, provider.Endpoint)
+			logger.Infof("[Dir:Handle] %s: S_CANCELSERVICE ignore service %s from %s", dir.name, service, provider.Endpoint)
 			provider.RemoveService(service)
 		}
 		dir.mu.Unlock()
@@ -134,7 +134,7 @@ func NewDirectory(name string) *Directory {
 		var c = r.Connection()
 		// will be using the IP from where the connection came
 		provider.Endpoint = fmt.Sprintf("%s:%s", c.RemoteAddr().(*net.TCPAddr).IP, provider.Endpoint)
-		logger.Infof("[Dir:Handle] S_PEERREADY peer ready: %+v", provider)
+		logger.Infof("[Dir:Handle] %s: S_PEERREADY peer ready: %+v", dir.name, provider)
 
 		dir.mu.Lock()
 		defer dir.mu.Unlock()
@@ -189,13 +189,13 @@ func (dir *Directory) Listen(addr string) error {
 		return err
 	}
 
-	logger.Infof("[Dir:Listen] Ping timeout of %s", dir.PingInterval*time.Duration(dir.PingFailures))
+	logger.Infof("[Dir:Listen] %s: Ping timeout of %s", dir.name, dir.PingInterval*time.Duration(dir.PingFailures))
 	// keep alive
 	var timeout = gomsg.NewTimeout(dir.PingInterval, dir.PingInterval*time.Duration(dir.PingFailures), func(o interface{}) {
 		if dir != nil && dir.server != nil {
 			c := o.(net.Conn)
 
-			logger.Debugf("[Dir:Listen] Ping timeout. Purging/killing connection from %s", c.RemoteAddr())
+			logger.Debugf("[Dir:Listen] %s: Ping timeout. Purging/killing connection from %s", dir.name, c.RemoteAddr())
 			dir.server.Kill(c)
 		}
 	})
@@ -315,7 +315,8 @@ func (node *Peer) SetIdleTimeout(timeout time.Duration) {
 	node.idleTimeout = timeout
 }
 
-func (node *Peer) addService(service string, endpoint string) {
+// addServiceProvider adds a service endpoint
+func (node *Peer) addServiceProvider(service string, endpoint string) {
 	var endpoints map[string]bool
 	if endpoints = node.providers[service]; endpoints == nil {
 		endpoints = make(map[string]bool)
@@ -338,25 +339,25 @@ func (node *Peer) Connect(bindAddr string, dirAddrs ...string) error {
 		var dir = gomsg.NewClient()
 		node.remoteDirs[k] = dir
 		dir.Handle(C_PEERREADY, func(provider Provider) {
-			logger.Infof("[Peer:Handle] C_PEERREADY peer %s notified of a new peer: %+v", bindAddr, provider)
+			logger.Infof("[Peer:Handle] %s: C_PEERREADY notified of a new peer: %+v", node.name, provider)
 
 			node.mu.Lock()
 
 			// group providers according to service
 			for _, service := range provider.Services {
-				node.addService(service, provider.Endpoint)
+				node.addServiceProvider(service, provider.Endpoint)
 			}
 
 			node.mu.Unlock()
 		})
 		dir.Handle(C_ADDSERVICE, func(service Service) {
-			logger.Infof("[Peer:Handle] C_ADDSERVICE peer %s notified of a new service: %+v", bindAddr, service)
+			logger.Infof("[Peer:Handle] %s: C_ADDSERVICE notified of a new service: %+v", node.name, service)
 			node.mu.Lock()
-			node.addService(service.Name, service.Endpoint)
+			node.addServiceProvider(service.Name, service.Endpoint)
 			node.mu.Unlock()
 		})
 		dir.Handle(C_CANCELSERVICE, func(service Service) {
-			logger.Infof("[Peer:Handle] C_CANCELSERVICE peer %s notified of a canceled service: %+v", bindAddr, service)
+			logger.Infof("[Peer:Handle] %s: C_CANCELSERVICE notified of a canceled service: %+v", node.name, service)
 
 			node.mu.Lock()
 			if endpoints := node.providers[service.Name]; endpoints != nil {
@@ -378,7 +379,7 @@ func (node *Peer) Connect(bindAddr string, dirAddrs ...string) error {
 			}
 		})
 		dir.Handle(C_DROPPEER, func(endpoint string) {
-			logger.Infof("[Peer:Handle] C_DROPPEER peer %s notified of a droped peer: %s", bindAddr, endpoint)
+			logger.Infof("[Peer:Handle] %s: C_DROPPEER notified of a droped peer: %s", node.name, endpoint)
 
 			node.mu.Lock()
 			for _, endpoints := range node.providers {
@@ -405,7 +406,8 @@ func (node *Peer) Connect(bindAddr string, dirAddrs ...string) error {
 
 						if _, ok := err.(gomsg.TimeoutError); ok || pong != PONG {
 							retries--
-							logger.Debugf("[Peer:Ticker] PING failed. retries left: %d", retries)
+							logger.Debugf("[Peer:Ticker] %s: pinging dir %s failed. retries left: %d",
+								node.name, w.Conn().RemoteAddr(), retries)
 							if retries == 0 {
 								ticker.Stop()
 							}
@@ -420,11 +422,6 @@ func (node *Peer) Connect(bindAddr string, dirAddrs ...string) error {
 			}()
 
 			node.dirs.Put(w.Conn(), w.Wire())
-
-			// only want for the first established connection to get the list of providers
-			if node.dirs.Size() > 1 {
-				return
-			}
 
 			node.mu.RLock()
 			var services = make([]string, len(node.services))
@@ -444,7 +441,7 @@ func (node *Peer) Connect(bindAddr string, dirAddrs ...string) error {
 
 				for _, v := range providers {
 					for _, s := range v.Services {
-						node.addService(s, v.Endpoint)
+						node.addServiceProvider(s, v.Endpoint)
 					}
 				}
 			})
@@ -482,7 +479,7 @@ func (node *Peer) connectPeer(peerAddr string) error {
 			if node.idleTimeout > 0 {
 				// disconnect connections idle for more than one minute
 				var debounce = gomsg.NewDebounce(node.idleTimeout, func(o interface{}) {
-					logger.Infof("Peer:Idle] Closing idle connection from %s to %s", node.name, peerAddr)
+					logger.Infof("Peer:Idle] %s: Closing idle connection to %s", node.name, peerAddr)
 					node.Kill(w.Conn())
 				})
 				wired.AddSendListener(0, func(event gomsg.SendEvent) {
@@ -518,7 +515,7 @@ func (node *Peer) disconnectPeer(peerAddr string) {
 	node.mu.RUnlock()
 
 	if cli != nil {
-		logger.Debugf("[Peer:disconnectPeer] disconnecting peer: %s", peerAddr)
+		logger.Debugf("[Peer:disconnectPeer] %s: disconnecting peer: %s", node.name, peerAddr)
 
 		// will eventually call OnClose
 		// where it will be removed from peers list
@@ -595,7 +592,7 @@ func (node *Peer) lazyConnect(topic string) {
 	node.mu.RUnlock()
 
 	for _, endpoint := range unconnected {
-		logger.Infof("[Peer:lazyConnect] connecting peer: %s", endpoint)
+		logger.Infof("[Peer:lazyConnect] %s: connecting peer: %s", node.name, endpoint)
 		node.connectPeer(endpoint)
 	}
 }

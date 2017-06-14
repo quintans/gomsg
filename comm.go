@@ -149,7 +149,7 @@ type Response struct {
 //var _ IResponse = Response{}
 
 func NewResponse(wire *Wire, c net.Conn, kind EKind, seq uint32, payload []byte) Response {
-	ctx := Response{
+	r := Response{
 		Context: &Context{
 			wire:     wire,
 			conn:     c,
@@ -159,11 +159,11 @@ func NewResponse(wire *Wire, c net.Conn, kind EKind, seq uint32, payload []byte)
 	}
 
 	if kind == ERR || kind == ERR_PARTIAL {
-		ctx.fault = errors.New(string(payload))
+		r.fault = errors.New(string(payload))
 	}
-	ctx.reply = payload
+	r.reply = payload
 
-	return ctx
+	return r
 }
 
 func (this Response) Reader() *InputStream {
@@ -335,7 +335,7 @@ type Wire struct {
 	timeout  time.Duration
 
 	mucb      sync.RWMutex
-	callbacks map[uint32]chan Response
+	callbacks map[uint32]chan *Response
 
 	disconnected func(net.Conn, error)
 	findHandlers func(name string) []func(ctx *Request)
@@ -348,7 +348,7 @@ type Wire struct {
 
 func NewWire(codec Codec) *Wire {
 	wire := &Wire{
-		callbacks:    make(map[uint32]chan Response),
+		callbacks:    make(map[uint32]chan *Response),
 		timeout:      time.Second * 20,
 		codec:        codec,
 		remoteTopics: make(map[string]bool),
@@ -398,12 +398,12 @@ func (this *Wire) hasRemoteTopic(name string) bool {
 	return false
 }
 
-func (this *Wire) asynchWaitForCallback(msg Envelope) {
+func (this *Wire) asynchWaitForCallback(msg Envelope) chan *Response {
 	this.mucb.Lock()
 	defer this.mucb.Unlock()
 
 	// frame channel
-	ch := make(chan Response, 1)
+	ch := make(chan *Response, 1)
 	this.callbacks[msg.sequence] = ch
 	// error channel
 	go func() {
@@ -411,23 +411,27 @@ func (this *Wire) asynchWaitForCallback(msg Envelope) {
 			select {
 			case <-time.After(msg.timeout):
 				this.delCallback(msg.sequence)
-				logger.Warnf(TIMEOUT, msg.timeout, msg.sequence, msg.kind, msg.name, msg.payload)
 				msg.errch <- TimeoutError(faults.New(TIMEOUT, msg.timeout, msg.sequence, msg.kind, msg.name, msg.payload))
 				return
 
-			case ctx := <-ch:
+			case r := <-ch:
+				// if it is nil, it was canceled
+				if r == nil {
+					return
+				}
+
 				if msg.handler != nil {
-					msg.handler(ctx)
+					msg.handler(*r)
 					// only breaks the loop if it is the last one
 					// allowing to receive multiple replies
-					if ctx.Last() {
+					if r.Last() {
 						msg.errch <- nil
 						return
 					}
 				} else {
-					if ctx.Kind == ACK {
+					if r.Kind == ACK {
 						msg.errch <- nil
-					} else if ctx.Kind == NACK {
+					} else if r.Kind == NACK {
 						msg.errch <- NACKERROR
 					}
 					return
@@ -435,9 +439,10 @@ func (this *Wire) asynchWaitForCallback(msg Envelope) {
 			}
 		}
 	}()
+	return ch
 }
 
-func (this *Wire) getCallback(seq uint32, last bool) chan Response {
+func (this *Wire) getCallback(seq uint32, last bool) chan *Response {
 	this.mucb.Lock()
 	defer this.mucb.Unlock()
 
@@ -515,16 +520,22 @@ func (this *Wire) NewReplyEnvelope(kind EKind, seq uint32, payload []byte) Envel
 
 func (this *Wire) writer(c net.Conn) {
 	for msg := range this.chin {
+		// writing to the wire can be faster (theoretically) than lauching the asynchWaitForCallback
+		// so we first prepare the reception if (any)
+		var ch chan *Response
+		if test(msg.kind, SUB, UNSUB, REQ, REQALL, PUSH) {
+			// wait the reply asynchronously
+			ch = this.asynchWaitForCallback(msg)
+		}
 		err := this.write(c, msg)
+
 		if err != nil {
-			msg.errch <- err
-		} else {
-			if test(msg.kind, SUB, UNSUB, REQ, REQALL, PUSH) {
-				// wait the reply asynchronously
-				this.asynchWaitForCallback(msg)
-			} else {
-				msg.errch <- nil
+			if ch != nil {
+				ch <- nil // stop waiting for calback
 			}
+			msg.errch <- err
+		} else if ch == nil {
+			msg.errch <- nil
 		}
 	}
 	// exit
@@ -681,9 +692,10 @@ func (this *Wire) reader(c net.Conn) {
 
 			cb := this.getCallback(seq, last)
 			if cb != nil {
-				cb <- NewResponse(this, c, kind, seq, data)
+				var r = NewResponse(this, c, kind, seq, data)
+				cb <- &r
 			} else {
-				logger.Debugf("No callback found for kind=%s, sequence=%d.", kind, seq)
+				logger.Errorf("No callback found for kind=%s, sequence=%d.", kind, seq)
 			}
 		}
 	}
@@ -1071,11 +1083,6 @@ func NewClient() *Client {
 	}
 
 	this.wire.disconnected = func(c net.Conn, e error) {
-		/*
-			if e != nil {
-				logger.Infof("> [wire.disconnect] error: %s", e)
-			}
-		*/
 		this.muconn.Lock()
 		defer this.muconn.Unlock()
 

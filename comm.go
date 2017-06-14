@@ -1057,8 +1057,8 @@ type Client struct {
 func NewClient() *Client {
 	this := &Client{
 		wire:                 NewWire(JsonCodec{}),
-		reconnectInterval:    time.Millisecond * 100,
-		reconnectMaxInterval: 0,
+		reconnectInterval:    time.Millisecond * 10,
+		reconnectMaxInterval: time.Second,
 	}
 	this.timeout = time.Second * 10
 	this.handlers = make([]handler, 0)
@@ -1275,6 +1275,9 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 				time.Sleep(retry)
 				if this.reconnectMaxInterval > 0 && retry < this.reconnectMaxInterval {
 					retry = retry * 2
+					if retry > this.reconnectMaxInterval {
+						retry = this.reconnectMaxInterval
+					}
 				}
 				this.dial(retry, cherr)
 			}()

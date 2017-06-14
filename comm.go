@@ -108,7 +108,7 @@ var (
 	NACKERROR = errors.New("Not Acknowledge Error")
 
 	UNKNOWNTOPIC = "No registered subscriber for %s."
-	TIMEOUT      = "Timeout while waiting for reply of %s(%s)."
+	TIMEOUT      = "Timeout (%s) while waiting for reply of call #%d %s(%s)=%s"
 )
 
 // Specific error types are define so that we can use type assertion, if needed
@@ -411,8 +411,9 @@ func (this *Wire) asynchWaitForCallback(msg Envelope) {
 			select {
 			case <-time.After(msg.timeout):
 				this.delCallback(msg.sequence)
-				msg.errch <- TimeoutError(faults.New(TIMEOUT, msg.kind, msg.name))
-				break
+				logger.Warnf(TIMEOUT, msg.timeout, msg.sequence, msg.kind, msg.name, msg.payload)
+				msg.errch <- TimeoutError(faults.New(TIMEOUT, msg.timeout, msg.sequence, msg.kind, msg.name, msg.payload))
+				return
 
 			case ctx := <-ch:
 				if msg.handler != nil {
@@ -421,7 +422,7 @@ func (this *Wire) asynchWaitForCallback(msg Envelope) {
 					// allowing to receive multiple replies
 					if ctx.Last() {
 						msg.errch <- nil
-						break
+						return
 					}
 				} else {
 					if ctx.Kind == ACK {
@@ -429,7 +430,7 @@ func (this *Wire) asynchWaitForCallback(msg Envelope) {
 					} else if ctx.Kind == NACK {
 						msg.errch <- NACKERROR
 					}
-					break
+					return
 				}
 			}
 		}
@@ -682,7 +683,7 @@ func (this *Wire) reader(c net.Conn) {
 			if cb != nil {
 				cb <- NewResponse(this, c, kind, seq, data)
 			} else {
-				logger.Debugf("< No callback found for kind=%s, sequence=%d.", kind, seq)
+				logger.Debugf("No callback found for kind=%s, sequence=%d.", kind, seq)
 			}
 		}
 	}
@@ -1267,9 +1268,9 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 	// gets the connection
 	c, err := net.DialTimeout("tcp", this.addr, time.Second)
 	if err != nil {
-		logger.Debugf("> [dial] failed to connect to %s", this.addr)
+		logger.Debugf("[dial] failed to connect to %s", this.addr)
 		if retry > 0 {
-			logger.Debugf("> [dial] retry in %v", retry)
+			logger.Debugf("[dial] retry in %v", retry)
 			go func() {
 				time.Sleep(retry)
 				if this.reconnectMaxInterval > 0 && retry < this.reconnectMaxInterval {
@@ -1278,17 +1279,17 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 				this.dial(retry, cherr)
 			}()
 		} else {
-			logger.Debugf("> [dial] NO retry will be performed!")
+			logger.Debugf("[dial] NO retry will be performed!")
 		}
 		return
 	}
 
-	logger.Debugf("> [dial] connected to %s with %s", this.addr, c.LocalAddr())
+	logger.Debugf("[dial] connected to %s with %s", this.addr, c.LocalAddr())
 
 	// topic exchange
 	err = this.handshake(c)
 	if err != nil {
-		logger.Errorf("> [dial] %s", err)
+		logger.Errorf("[dial] error while handshaking: %s", err)
 		c.Close()
 	} else {
 		go this.wire.writer(c)
@@ -1885,7 +1886,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 					// do not send to self
 					if skipWire == nil || skipWire != w.wire {
 						// increment reply counter
-						logger.Debugf("< [SendSkip] sending message to %s (ungrouped)", w.Conn().RemoteAddr())
+						logger.Debugf("[SendSkip] sending message to %s (ungrouped)", w.Conn().RemoteAddr())
 						wg.Add(1)
 						ch := w.Send(msg)
 						go func() {
@@ -1894,7 +1895,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 							if e == nil {
 								err = nil // at least one got through
 							} else {
-								logger.Infof("< [SendSkip] %s", e)
+								logger.Infof("[SendSkip] %s", e)
 							}
 							wg.Done()
 						}()
@@ -1909,7 +1910,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 						w := grp.wires[l.Next()]
 						// do not send to self
 						if skipWire == nil || skipWire != w.wire {
-							logger.Debugf("< [SendSkip] sending message to %s (group %s)", w.Conn().RemoteAddr(), id)
+							logger.Debugf("[SendSkip] sending message to %s (group %s)", w.Conn().RemoteAddr(), id)
 							// waits for the request completion
 							e := <-w.Send(msg)
 							// send only to one.
@@ -1927,7 +1928,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 		go func() {
 			// Wait for all requests to complete.
 			wg.Wait()
-			logger.Debugf("< [SendSkip] all requests finnished")
+			logger.Debugf("[SendSkip] all requests finnished")
 			// pass the end mark
 			if handler != nil {
 				handler(NewResponse(skipWire, nil, ACK, 0, nil))
@@ -1969,18 +1970,17 @@ func (this *Server) Listen(service string) error {
 		return err
 	}
 	this.listener = l
-	logger.Debugf("< [Listen] listening at %s", l.Addr())
+	logger.Debugf("[Listen] listening at %s", l.Addr())
 	go func() {
 		for {
 			// notice that c is changed in the disconnect function
 			c, err := l.Accept()
 			if err != nil {
 				// happens when the listener is closed
-				//logger.Infof("< accepting no more due to error: %s", err)
-				logger.Infof("< [Listen] Stoped listening at %s", l.Addr())
+				logger.Infof("[Listen] Stoped listening at %s", l.Addr())
 				return
 			}
-			logger.Debugf("< [Listen] accepted connection from %s", c.RemoteAddr())
+			logger.Debugf("[Listen] accepted connection from %s", c.RemoteAddr())
 
 			wire := NewWire(this.Codec)
 			wire.findHandlers = this.findHandlers
@@ -1990,7 +1990,7 @@ func (this *Server) Listen(service string) error {
 
 			if err != nil {
 				c.Close()
-				logger.Errorf("< Failed to handshake: %s", err)
+				logger.Errorf("Failed to handshake: %s", err)
 			} else {
 				wire.remoteGroupID = group
 				wire.remoteTopics = remoteTopics
@@ -2002,9 +2002,9 @@ func (this *Server) Listen(service string) error {
 					if c == conn {
 						// handle errors during a connection
 						if faults.Has(e, io.EOF) || isClosed(e) {
-							logger.Infof("< [wire.disconnected] client %s closed connection", c.RemoteAddr())
+							logger.Infof("[wire.disconnected] client %s closed connection", c.RemoteAddr())
 						} else if e != nil {
-							logger.Errorf("< [wire.disconnected] %s", faults.Wrap(e))
+							logger.Errorf("[wire.disconnected] %s", faults.Wrap(e))
 						}
 
 						this.Wires.Kill(c)

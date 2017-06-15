@@ -532,7 +532,7 @@ func (node *Peer) Name() string {
 }
 
 // Handle handles incoming messages for a topic
-func (node *Peer) Handle(name string, fun interface{}) *Peer {
+func (node *Peer) Handle(name string, fun interface{}) <-chan error {
 	node.local.Handle(name, fun)
 
 	node.mu.Lock()
@@ -540,9 +540,9 @@ func (node *Peer) Handle(name string, fun interface{}) *Peer {
 	node.mu.Unlock()
 
 	// notify service directory cluster of new handle
-	node.dirs.RequestAll(S_ADDSERVICE, name, nil, time.Second)
+	var errch = node.dirs.RequestAll(S_ADDSERVICE, name, nil, time.Second)
 
-	return node
+	return errch
 }
 
 // Cancel cancels handling of incoming messages for a topic

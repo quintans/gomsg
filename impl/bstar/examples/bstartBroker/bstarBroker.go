@@ -1,6 +1,6 @@
 // THIS IS A WORK IN PROGRESS
 
-package impl
+package main
 
 import (
 	"fmt"
@@ -8,13 +8,13 @@ import (
 	"time"
 
 	"github.com/quintans/gomsg"
-	"github.com/quintans/gomsg/impl"
+	"github.com/quintans/gomsg/impl/bstar"
 )
 
 const PUB_PREFIX = "pub/"
 
 func main() {
-	handler := func(bstar *impl.BStar, req *gomsg.Request) {
+	handler := func(bstar *bstar.BStar, req *gomsg.Request) {
 		// Consider any request under "pub/" to be a publish.
 		// This is way we can publishing and receive a confirmation.
 		// To allow for the other clients receive the a PUB message under the right topic
@@ -25,12 +25,12 @@ func main() {
 		}
 	}
 
-	pAddr := "127.0.0.1: 7011"
-	bAddr := "127.0.0.1: 7012"
-	primary := impl.NewBStar(true, "*:7001", "*:7011", bAddr)
+	pAddr := "127.0.0.1:7011"
+	bAddr := "127.0.0.1:7012"
+	primary := bstar.NewBStar(true, "*:7001", "*:7011", bAddr)
 	primary.SetClientHandler(handler)
 
-	backup := impl.NewBStar(false, "*:7002", "*:7012", pAddr)
+	backup := bstar.NewBStar(false, "*:7002", "*:7012", pAddr)
 	backup.SetClientHandler(handler)
 
 	primary.Start()
@@ -42,6 +42,8 @@ func main() {
 	h := func() {
 		fmt.Println("I: server replied OK")
 	}
-	bsClient1 := impl.NewBStarClient(pAddr, bAddr)
+	bsClient1 := bstar.NewBStarClient(pAddr, bAddr)
 	bsClient1.Request(endpoint, "one two three", h, time.Second)
+
+	time.Sleep(time.Second * 3)
 }

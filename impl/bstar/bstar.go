@@ -1,6 +1,6 @@
 // THIS IS A WORK IN PROGRESS
 
-package impl
+package bstar
 
 import (
 	"fmt"
@@ -68,47 +68,58 @@ func (this *BStar) stateMachine(event Event) bool {
 
 	//  These are the PRIMARY and BACKUP states; we're waiting to become
 	//  ACTIVE or PASSIVE depending on events we get from our peer:
-	if this.state == STATE_PRIMARY {
-		if this.event == PEER_BACKUP {
+	switch this.state {
+	case STATE_PRIMARY:
+		switch this.event {
+		case PEER_BACKUP:
 			fmt.Println("I: connected to backup (passive), ready active")
 			this.state = STATE_ACTIVE
-		} else if this.event == PEER_ACTIVE {
+
+		case PEER_ACTIVE:
 			fmt.Println("I: connected to backup (active), ready passive")
 			this.state = STATE_PASSIVE
 		}
-	} else if this.state == STATE_BACKUP {
+
+	case STATE_BACKUP:
 		//  Accept client connections
-		if this.event == PEER_ACTIVE {
+		switch this.event {
+		case PEER_ACTIVE:
 			fmt.Println("I: connected to primary (active), ready passive")
 			this.state = STATE_PASSIVE
-		} else if this.event == CLIENT_REQUEST {
+		case CLIENT_REQUEST:
 			//  Reject client connections when acting as backup
 			exception = true
 		}
-	} else if this.state == STATE_ACTIVE {
+
+	case STATE_ACTIVE:
 		//  These are the ACTIVE and PASSIVE states:
 		if this.event == PEER_ACTIVE {
 			//  Two actives would mean split-brain
 			fmt.Println("E: fatal error - dual actives, aborting")
 			exception = true
 		}
-	} else if this.state == STATE_PASSIVE {
+
+	case STATE_PASSIVE:
 		//  Server is passive
 		//  CLIENT_REQUEST events can trigger failover if peer looks dead
 
-		if this.event == PEER_PRIMARY {
+		switch this.event {
+		case PEER_PRIMARY:
 			//  Peer is restarting - become active, peer will go passive
 			fmt.Println("I: primary (passive) is restarting, ready active")
 			this.state = STATE_ACTIVE
-		} else if this.event == PEER_BACKUP {
+
+		case PEER_BACKUP:
 			//  Peer is restarting - become active, peer will go passive
 			fmt.Println("I: backup (passive) is restarting, ready active")
 			this.state = STATE_ACTIVE
-		} else if this.event == PEER_PASSIVE {
+
+		case PEER_PASSIVE:
 			//  Two passives would mean cluster would be non-responsive
 			fmt.Println("E: fatal error - dual passives, aborting")
 			exception = true
-		} else if this.event == CLIENT_REQUEST {
+
+		case CLIENT_REQUEST:
 			//  Peer becomes active if timeout has passed
 			//  It's the client request that triggers the failover
 			if time.Now().After(this.peerExpiry) {
@@ -212,56 +223,4 @@ func (this *BStar) Start() {
 
 func (bstar *BStar) Stop() {
 	bstar.quit <- true
-}
-
-const (
-	REQUEST_TIMEOUT = time.Second
-	SETTLE_DELAY    = REQUEST_TIMEOUT * 2 //  Before failing over
-)
-
-type BStarClient struct {
-	client    *gomsg.Client
-	servers   []string
-	serverNbr int
-}
-
-func NewBStarClient(primary string, backup string) BStarClient {
-	this := BStarClient{
-		client:  gomsg.NewClient().SetCodec(codec),
-		servers: []string{primary, backup},
-	}
-	this.client.SetTimeout(time.Second)
-	this.client.Connect(primary)
-
-	return this
-}
-
-// Request sends a request to the Binary Star.
-// If there's no reply within our timeout, we close the socket and try again.
-// In Binary Star, it's the client vote that decides which
-// server is primary; the client must therefore try to connect
-// to each server in turn:
-func (bsc BStarClient) Request(name string, payload interface{}, handler interface{}, timeout time.Duration) {
-	expectReply := true
-	// A request is used so that the bstar server can decide not to reply
-	// if there is an inconsistent server state
-	ch := bsc.client.RequestTimeout(name, payload, handler, timeout)
-	for expectReply {
-		err := <-ch
-		if err == nil {
-			expectReply = false
-		} else {
-			fmt.Println("W: no response from server, failing over. error:", err)
-			//  client is confused; close it and open a new one
-			bsc.client.Destroy()
-			bsc.serverNbr = (bsc.serverNbr + 1) % 2
-			<-time.After(SETTLE_DELAY)
-			fmt.Printf("I: connecting to server at %s...\n", bsc.servers[bsc.serverNbr])
-			bsc.client = gomsg.NewClient().SetCodec(codec)
-			bsc.client.Connect(bsc.servers[bsc.serverNbr])
-
-			//  Send request again, on new client
-			ch = bsc.client.RequestTimeout(name, payload, handler, timeout)
-		}
-	}
 }

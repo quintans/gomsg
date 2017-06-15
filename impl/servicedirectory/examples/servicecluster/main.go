@@ -105,29 +105,26 @@ func main() {
 	// must observe rotation of the deliveries
 	fmt.Println("==== must observe rotation of the deliveries ====")
 	for i := 3; i < 7; i++ {
-		peer1.Push(Topic1, fmt.Sprintf("test #%d", i))
-		wait()
+		<-peer1.Push(Topic1, fmt.Sprintf("test #%d", i))
 	}
 
 	//=============== PUB SUB example =======
 	fmt.Println("====== BEGIN PUB SUB example =======")
 	// must observe all deliveries
-	peer1.Publish(Topic1, "teste")
-	wait()
+	<-peer1.Publish(Topic1, "teste")
 	fmt.Println("====== END of PUB SUB example =======")
 
 	//=============== REQ REP example =======
 	fmt.Println("====== BEGIN REQ REP example =======")
-	peer2.Handle(Topic2, func() string {
+	<-peer2.Handle(Topic2, func() string {
 		return "Two"
 	})
-	peer3.Handle(Topic2, func() string {
+	<-peer3.Handle(Topic2, func() string {
 		return "Three"
 	})
-	peer4.Handle(Topic2, func() string {
+	<-peer4.Handle(Topic2, func() string {
 		return "Four"
 	})
-	wait()
 
 	var size = len(peer1.Endpoints(Topic1))
 	if size != 3 {
@@ -173,25 +170,20 @@ func main() {
 	fmt.Println("====== Request One =======")
 	// must observe rotation of the replies
 	for i := 0; i < 5; i++ {
-		peer1.Request(Topic2, nil, func(s string) {
+		<-peer1.Request(Topic2, nil, func(s string) {
 			fmt.Printf("=====>[%v] %s\n", i, s)
 		})
-		wait()
 	}
-	wait()
 
 	fmt.Println("====== Request All example =======")
 	// must observe all replying
-	peer1.RequestAll(Topic2, nil, func(s string) {
+	<-peer1.RequestAll(Topic2, nil, func(s string) {
 		var str = s
 		if s == "" {
 			str = "[END]"
 		}
 		fmt.Println("=====>", str)
 	}, time.Second)
-	wait()
-
-	time.Sleep(time.Second * 2) // are there any requests pending?
 
 	fmt.Println("====== Drop DIR #2 =======")
 	dir2.Destroy() // removed from the cluster

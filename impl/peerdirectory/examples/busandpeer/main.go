@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/quintans/gomsg"
-	"github.com/quintans/gomsg/impl"
+	"github.com/quintans/gomsg/impl/peerdirectory"
 )
 
 const (
@@ -19,7 +19,7 @@ var codec = gomsg.JsonCodec{}
 
 func main() {
 
-	impl.NewDirectory("127.0.0.1:7777", codec)
+	peerdirectory.NewDirectory("127.0.0.1:7777", codec)
 	time.Sleep(time.Millisecond * 100)
 
 	peer1 := impl.NewPeer("127.0.0.1:7777", ":6001", codec)

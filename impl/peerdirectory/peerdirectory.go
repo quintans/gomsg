@@ -1,4 +1,4 @@
-package impl
+package peerdirectory
 
 import (
 	"fmt"
@@ -110,7 +110,7 @@ func (this *Peers) Remove(addr string) {
 	for k, v := range this.peers {
 		if v.addr == addr {
 			v.peer.Destroy()
-						// since the slice has a non-primitive, we have to zero it
+			// since the slice has a non-primitive, we have to zero it
 			copy(this.peers[k:], this.peers[k+1:])
 			this.peers[len(this.peers)-1] = nil // zero it
 			this.peers = this.peers[:len(this.peers)-1]

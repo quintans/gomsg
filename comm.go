@@ -822,7 +822,11 @@ func validateSigErr(params []reflect.Type, contextType reflect.Type) (bool, bool
 	return true, hasContext, payloadType, hasError
 }
 
-func createReplyHandler(codec Codec, fun interface{}) func(ctx Response) {
+func CreateResponseHandler(codec Codec, fun interface{}) func(Response) {
+	if f, ok := fun.(func(Response)); ok {
+		return f
+	}
+
 	// validate input
 	var payloadType reflect.Type
 	var hasContext, hasError, ok bool
@@ -857,9 +861,9 @@ func createReplyHandler(codec Codec, fun interface{}) func(ctx Response) {
 				if e != nil {
 					logger.Errorf("[deserializeHandshake] Unable to decode %s; cause=%s", ctx.reply, e)
 					ctx.fault = e
-				} else {
-					params = append(params, p.Elem())
 				}
+				params = append(params, p.Elem())
+
 			} else {
 				// when the codec is nil the data is sent as is
 				if ctx.reply == nil {
@@ -879,7 +883,11 @@ func createReplyHandler(codec Codec, fun interface{}) func(ctx Response) {
 
 }
 
-func createRequestHandler(codec Codec, fun interface{}) func(ctx *Request) {
+func CreateRequestHandler(codec Codec, fun interface{}) func(*Request) {
+	if f, ok := fun.(func(*Request)); ok {
+		return f
+	}
+
 	// validate input
 	var payloadType reflect.Type
 	function := reflect.ValueOf(fun)
@@ -1035,7 +1043,7 @@ func (this *ClientServer) SetTimeout(timeout time.Duration) {
 func createEnvelope(kind EKind, name string, payload interface{}, success interface{}, timeout time.Duration, codec Codec) (Envelope, error) {
 	var handler func(ctx Response)
 	if success != nil {
-		handler = createReplyHandler(codec, success)
+		handler = CreateResponseHandler(codec, success)
 	}
 
 	msg := Envelope{
@@ -1245,6 +1253,10 @@ func (this *Client) Connect(addr string) <-chan error {
 	return cherr
 }
 
+func (this *Client) Address() string {
+	return this.addr
+}
+
 func (this *Client) Reconnect() <-chan error {
 	this.Disconnect()
 	return this.Connect(this.addr)
@@ -1284,7 +1296,7 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 	c, err := net.DialTimeout("tcp", this.addr, time.Second)
 	if err != nil {
 		logger.Debugf("[dial] failed to connect to %s", this.addr)
-		if retry > 0 {
+		if this.reconnectInterval > 0 {
 			logger.Debugf("[dial] retry in %v", retry)
 			go func() {
 				time.Sleep(retry)
@@ -1334,8 +1346,7 @@ func (this *Client) Connection() net.Conn {
 // When handling Request/RequestAll messages, if a return is not specified,
 // the caller will not receive a reply until you explicitly call gomsg.Request.ReplyAs()
 func (this *Client) Handle(name string, fun interface{}) {
-	hnd := createRequestHandler(this.wire.codec, fun)
-
+	hnd := CreateRequestHandler(this.wire.codec, fun)
 	this.addHandler(name, hnd)
 
 	this.muconn.Lock()
@@ -1360,15 +1371,11 @@ func (this *Client) Cancel(name string) {
 }
 
 // Request sends a message and waits for the reply
-// If the type of the payload is *mybus.Msg
-// it will ignore encoding and use the internal bytes as the payload.
 func (this *Client) Request(name string, payload interface{}, handler interface{}) <-chan error {
 	return this.RequestTimeout(name, payload, handler, this.timeout)
 }
 
 // RequestTimeout is the same as Request with a timeout definition
-// If the type of the payload is *mybus.Msg
-// it will ignore encoding and use the internal bytes as the payload.
 func (this *Client) RequestTimeout(name string, payload interface{}, handler interface{}, timeout time.Duration) <-chan error {
 	return this.Send(REQ, name, payload, handler, timeout)
 }
@@ -1384,22 +1391,16 @@ func (this *Client) RequestAllTimeout(name string, payload interface{}, handler 
 }
 
 // Push sends a message and receive an acknowledge
-// If the type of the payload is *mybus.Msg
-// it will ignore encoding and use the internal bytes as the payload.
 func (this *Client) Push(name string, m interface{}) <-chan error {
 	return this.PushTimeout(name, m, this.timeout)
 }
 
 // PushTimeout  is the same as Push with a timeout definition
-// If the type of the payload is *mybus.Msg
-// it will ignore encoding and use the internal bytes as the payload.
 func (this *Client) PushTimeout(name string, m interface{}, timeout time.Duration) <-chan error {
 	return this.Send(PUSH, name, m, nil, timeout)
 }
 
 // Publish sends a message without any reply
-// If the type of the payload is *mybus.Msg
-// it will ignore encoding and use the internal bytes as the payload.
 func (this *Client) Publish(name string, m interface{}) <-chan error {
 	return this.PublishTimeout(name, m, this.timeout)
 }
@@ -1411,7 +1412,6 @@ func (this *Client) PublishTimeout(name string, m interface{}, timeout time.Dura
 }
 
 // When the payload is of type []byte it passes the raw bytes without encoding.
-// When the payload is of type mybus.Msg it passes the FRAMED raw bytes without encoding.
 func (this *Client) Send(kind EKind, name string, payload interface{}, handler interface{}, timeout time.Duration) <-chan error {
 	msg, err := createEnvelope(kind, name, payload, handler, timeout, this.wire.codec)
 	if err != nil {
@@ -1771,6 +1771,11 @@ func (this *Wires) Request(name string, payload interface{}, handler interface{}
 	return this.Send(REQ, name, payload, handler, time.Second)
 }
 
+// RequestTimeout sends a message and waits for the reply
+func (this *Wires) RequestTimeout(name string, payload interface{}, handler interface{}, timeout time.Duration) <-chan error {
+	return this.Send(REQ, name, payload, handler, timeout)
+}
+
 // RequestAll requests messages to all connected clients. If a client is not connected it is forever lost.
 func (this *Wires) RequestAll(name string, payload interface{}, handler interface{}, timeout time.Duration) <-chan error {
 	return this.Send(REQALL, name, payload, handler, timeout)
@@ -1981,6 +1986,10 @@ func (this *Server) BindPort() int {
 	return 0
 }
 
+func (this *Server) Listener() net.Listener {
+	return this.listener
+}
+
 func (this *Server) Listen(service string) error {
 	// listen all interfaces
 	l, err := net.Listen("tcp", service)
@@ -2110,6 +2119,7 @@ func (this *Server) Destroy() {
 	if this.listener != nil {
 		this.listener.Close()
 	}
+	this.listener = nil
 }
 
 // Handle defines the function that will handle messages for a topic.
@@ -2120,7 +2130,7 @@ func (this *Server) Destroy() {
 // When handling Request/RequestAll messages, if a return is not specified,
 // the caller will not receive a reply until you explicitly call gomsg.Request.ReplyAs()
 func (this *Server) Handle(name string, fun interface{}) {
-	hnd := createRequestHandler(this.Codec, fun)
+	hnd := CreateRequestHandler(this.Codec, fun)
 
 	this.addHandler(name, hnd)
 

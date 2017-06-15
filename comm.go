@@ -602,6 +602,8 @@ func read(r *InputStream, bname bool, bpayload bool) (name string, payload []byt
 func (this *Wire) reader(c net.Conn) {
 	r := NewInputStream(c)
 	var err error
+
+loop:
 	for {
 		// we wait forever for the first read
 		c.SetReadDeadline(time.Time{})
@@ -628,7 +630,7 @@ func (this *Wire) reader(c net.Conn) {
 		var data []byte
 
 		if test(kind, SUB, UNSUB, REQ, REQALL, PUSH, PUB) {
-			if kind == SUB || kind == UNSUB {
+			if test(kind, SUB, UNSUB) {
 				// un/register topic from peer
 				name, _, err = read(r, true, false)
 				if err != nil {
@@ -669,21 +671,22 @@ func (this *Wire) reader(c net.Conn) {
 			case REP_PARTIAL, REP:
 				_, data, err = read(r, false, true)
 				if err != nil {
-					break
+					break loop
 				}
 				last = kind == REP
 
 			case ERR, ERR_PARTIAL:
 				_, data, err = read(r, false, true)
 				if err != nil {
-					break
+					break loop
 				}
 				// reply was an error
 				var s string
 				if this.codec != nil {
 					var e = this.codec.Decode(data, &s)
 					if e != nil {
-						panic(fmt.Sprintf("[reader] Unable to decode %s; cause=%s", data, e))
+						logger.Errorf("[reader] Unable to decode %s; cause=%s", data, e)
+						s = fmt.Sprintf("Unable to decode %s; cause=%s", data, e)
 					}
 					data = []byte(s)
 				}
@@ -852,9 +855,11 @@ func createReplyHandler(codec Codec, fun interface{}) func(ctx Response) {
 				p = reflect.New(payloadType)
 				var e = codec.Decode(ctx.reply, p.Interface())
 				if e != nil {
-					panic(fmt.Sprintf("[deserializeHandshake] Unable to decode %s; cause=%s", ctx.reply, e))
+					logger.Errorf("[deserializeHandshake] Unable to decode %s; cause=%s", ctx.reply, e)
+					ctx.fault = e
+				} else {
+					params = append(params, p.Elem())
 				}
-				params = append(params, p.Elem())
 			} else {
 				// when the codec is nil the data is sent as is
 				if ctx.reply == nil {
@@ -921,7 +926,10 @@ func createRequestHandler(codec Codec, fun interface{}) func(ctx *Request) {
 				p = reflect.New(payloadType)
 				var e = codec.Decode(req.payload, p.Interface())
 				if e != nil {
-					panic(fmt.Sprintf("[deserializeHandshake] Unable to decode %s; cause=%s", req.payload, e))
+					//panic(fmt.Sprintf("[createRequestHandler] Unable to decode %s; cause=%s", req.payload, e))
+					logger.Errorf("[createRequestHandler] Unable to decode %s; cause=%s", req.payload, e)
+					req.SetFault(e)
+					return
 				}
 				params = append(params, p.Elem())
 			} else {

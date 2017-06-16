@@ -21,18 +21,24 @@ import (
 var logger = log.LoggerFor("github.com/quintans/gomsg/brokerless")
 
 const (
-	UdpAddr         = "224.0.0.1:9999"
-	MaxDatagramSize = 1024
-	TAG             = "PEER"
-	UuidSize        = 16
-	PING            = "PING"
-	BeaconInterval  = time.Second
+	UdpAddr           = "224.0.0.1:9999"
+	MaxDatagramSize   = 1024
+	TAG               = "PEER"
+	UuidSize          = 16
+	PING              = "PING"
+	BeaconInterval    = time.Second
+	BeaconMaxInterval = BeaconInterval * 2
+	// BeaconCountdown is the number of consecutive pings inside the ping window
+	// to reactivate the UDP health check
+	BeaconCountdown = 3
 )
 
 type node struct {
-	uuid      string
-	client    *gomsg.Client
-	debouncer *toolkit.Debouncer
+	uuid            string
+	client          *gomsg.Client
+	debouncer       *toolkit.Debouncer
+	beaconLastTime  time.Time
+	beaconCountdown int
 }
 
 type Peer struct {
@@ -55,9 +61,6 @@ func NewPeer(uuid []byte) *Peer {
 		handlers: make(map[string]interface{}),
 		timeout:  time.Second,
 	}
-	// when a peer tries to check if I exist
-	// because it did not received the beacon in time
-	peer.handlers[PING] = func() {}
 
 	return peer
 }
@@ -69,6 +72,12 @@ func (peer *Peer) Timeout(timeout time.Duration) {
 func (peer *Peer) Connect(tcpAddr string) {
 	logger.Infof("Binding peer %X at %s", peer.uuid, tcpAddr)
 	peer.server = gomsg.NewServer()
+
+	// special case where we receive a targeted request
+	// when a peer tries to check if I exist
+	// because it did not received the beacon in time
+	peer.server.Handle(PING, func() {})
+
 	peer.tcpAddr = tcpAddr
 	peer.server.Listen(tcpAddr)
 	peer.startBeacon(UdpAddr)
@@ -88,11 +97,34 @@ func (peer *Peer) checkPeer(uuid string, addr string) {
 			delete(peer.peers, uuid)
 			peer.connectPeer(uuid, addr)
 		} else {
-			n.debouncer.Delay(nil)
+			peer.checkBeacon(n)
 		}
 	} else {
 		logger.Infof("%X - Registering NEW peer %s at %s", peer.uuid, uuid, addr)
 		peer.connectPeer(uuid, addr)
+	}
+}
+
+func (peer *Peer) checkBeacon(n *node) {
+	if n.beaconCountdown == 0 {
+		// this debouncer is only for UDP beacon when beaconCountdown == 0
+		n.debouncer.Delay(nil)
+	} else {
+		println("check " + n.uuid)
+		var now = time.Now()
+		if now.Sub(n.beaconLastTime) < BeaconMaxInterval {
+			n.beaconCountdown--
+		} else {
+			n.beaconCountdown = BeaconCountdown
+		}
+		if n.beaconCountdown == 0 {
+			// the client responded, switching to UDP
+			logger.Infof("%X - Peer %s at %s responded. Switching to UDP listening", peer.uuid, n.uuid, n.client.Address())
+			// kill the TCP health check
+			n.debouncer.Kill()
+			peer.healthCheckByUDP(n)
+		}
+		n.beaconLastTime = now
 	}
 }
 
@@ -117,38 +149,38 @@ func (peer *Peer) connectPeer(uuid string, addr string) error {
 	return nil
 }
 
-func (peer *Peer) dropPeer(uuid string) {
+func (peer *Peer) dropPeer(n *node) {
 	peer.mu.Lock()
 	defer peer.mu.Unlock()
 
-	if n := peer.peers[uuid]; n != nil {
-		logger.Infof("%X - Ignoring unresponsive peer %s at %s", peer.uuid, uuid, n.client.Address())
-		n.client.Destroy()
-		n.debouncer = nil
-		delete(peer.peers, uuid)
-	}
+	logger.Infof("%X - Purging unresponsive peer %s at %s", peer.uuid, n.uuid, n.client.Address())
+	n.client.Destroy()
+	n.debouncer = nil
+	delete(peer.peers, n.uuid)
 }
 
 // healthCheckByIP is the client that checks actively the remote peer
 func (peer *Peer) healthCheckByTCP(n *node) {
-	n.debouncer = toolkit.NewDebounce(BeaconInterval*2, func(o interface{}) {
-		peer.dropPeer(n.uuid)
-	})
-	go func() {
-		n.client.RequestTimeout(PING, nil, func() {
+	var ticker = toolkit.NewTicker(BeaconInterval, func(t time.Time) {
+		logger.Infof("===>requesting ping for " + n.uuid)
+		<-n.client.RequestTimeout(PING, nil, func() {
 			n.debouncer.Delay(nil)
-			// the client responded, switching to UDP
-			logger.Infof("%X - Peer %s at %s responded. Switching to UDP listening", peer.uuid, n.uuid, n.client.Address())
-			n.debouncer.Kill()
-			peer.healthCheckByUDP(n)
+			logger.Infof("===>ping from " + n.uuid)
 		}, BeaconInterval)
-	}()
+	})
+	n.debouncer = toolkit.NewDebounce(BeaconMaxInterval, func(o interface{}) {
+		peer.dropPeer(n)
+	})
+	n.debouncer.OnExit = func() {
+		ticker.Stop()
+	}
 }
 
 func (peer *Peer) healthCheckByUDP(n *node) {
-	n.debouncer = toolkit.NewDebounce(BeaconInterval*2, func(o interface{}) {
+	n.debouncer = toolkit.NewDebounce(BeaconMaxInterval, func(o interface{}) {
 		// the client did not responded, switching to TCP
 		logger.Infof("%X - Silent peer %s at %s. Switching to TCP ping", peer.uuid, n.uuid, n.client.Address())
+		n.beaconCountdown = BeaconCountdown
 		peer.healthCheckByTCP(n)
 	})
 }

@@ -162,10 +162,8 @@ func (peer *Peer) dropPeer(n *node) {
 // healthCheckByIP is the client that checks actively the remote peer
 func (peer *Peer) healthCheckByTCP(n *node) {
 	var ticker = toolkit.NewTicker(BeaconInterval, func(t time.Time) {
-		logger.Infof("===>requesting ping for " + n.uuid)
 		<-n.client.RequestTimeout(PING, nil, func() {
 			n.debouncer.Delay(nil)
-			logger.Infof("===>ping from " + n.uuid)
 		}, BeaconInterval)
 	})
 	n.debouncer = toolkit.NewDebounce(BeaconMaxInterval, func(o interface{}) {

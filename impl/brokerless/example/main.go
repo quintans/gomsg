@@ -15,7 +15,7 @@ func wait() {
 }
 
 func init() {
-	log.Register("/", log.DEBUG).ShowCaller(true)
+	log.Register("/", log.INFO).ShowCaller(true)
 }
 
 func uuid() []byte {
@@ -37,11 +37,13 @@ func main() {
 	})
 	cli1.Connect(":7001")
 
-	var cli2 = brokerless.NewPeer(uuid())
-	cli2.Handle(SERVICE_GREETING, func(greeting string) string {
-		return "#2: hi " + greeting
-	})
-	cli2.Connect(":7002")
+	/*
+		var cli2 = brokerless.NewPeer(uuid())
+		cli2.Handle(SERVICE_GREETING, func(greeting string) string {
+			return "#2: hi " + greeting
+		})
+		cli2.Connect(":7002")
+	*/
 
 	var uuid3 = uuid()
 	var cli3 = brokerless.NewPeer(uuid3)
@@ -65,11 +67,13 @@ func main() {
 	})
 
 	// replies should rotate
-	for i := 0; i < 3; i++ {
-		<-cli2.Request(SERVICE_GREETING, "#2", func(r gomsg.Response) {
-			fmt.Println("=====>", string(r.Reply()))
-		})
-	}
+	/*
+		for i := 0; i < 3; i++ {
+			<-cli2.Request(SERVICE_GREETING, "#2", func(r gomsg.Response) {
+				fmt.Println("=====>", string(r.Reply()))
+			})
+		}
+	*/
 
 	cli3.Destroy()
 	fmt.Println("Waiting...")

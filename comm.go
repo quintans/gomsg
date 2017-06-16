@@ -551,6 +551,7 @@ func (this *Wire) write(c net.Conn, msg Envelope) (err error) {
 
 	c.SetWriteDeadline(timeouttime(msg.timeout))
 
+	logger.Infof("===> Writing %s from %s to %s", msg.name, c.LocalAddr(), c.RemoteAddr())
 	buf := bufio.NewWriter(c)
 	w := NewOutputStream(buf)
 
@@ -719,6 +720,7 @@ func (this *Wire) runHandler() {
 	for msgconn := range this.handlerch {
 		msg := msgconn.message
 		c := msgconn.conn
+
 		if msg.kind == REQ || msg.kind == REQALL {
 			// Serve
 			var reply []byte
@@ -1111,9 +1113,7 @@ func NewClient() *Client {
 			}
 			this.conn = nil
 			if this.reconnectInterval > 0 {
-				go func(interval time.Duration) {
-					this.dial(interval, make(chan error, 1))
-				}(this.reconnectInterval)
+				go this.dial(this.reconnectInterval, make(chan error, 1))
 			}
 		}
 
@@ -1249,7 +1249,7 @@ func deserializeHandshake(c net.Conn, codec Codec, timeout time.Duration) (strin
 func (this *Client) Connect(addr string) <-chan error {
 	this.addr = addr
 	var cherr = make(chan error, 1)
-	this.dial(this.reconnectInterval, cherr)
+	go this.dial(this.reconnectInterval, cherr)
 	return cherr
 }
 
@@ -1289,16 +1289,15 @@ func (this *Client) Active() bool {
 // tries do dial. If dial fails and if reconnectInterval > 0
 // it schedules a new try within reconnectInterval milliseconds
 func (this *Client) dial(retry time.Duration, cherr chan error) {
-	this.muconn.Lock()
-	defer this.muconn.Unlock()
-
-	// gets the connection
-	c, err := net.DialTimeout("tcp", this.addr, time.Second)
-	if err != nil {
-		logger.Debugf("[dial] failed to connect to %s", this.addr)
-		if this.reconnectInterval > 0 {
-			logger.Debugf("[dial] retry in %v", retry)
-			go func() {
+	var c net.Conn
+	var err error
+	for {
+		// gets the connection
+		c, err = net.DialTimeout("tcp", this.addr, time.Second)
+		if err != nil {
+			logger.Debugf("[dial] failed to connect to %s", this.addr)
+			if this.reconnectInterval > 0 {
+				logger.Debugf("[dial] retry in %v", retry)
 				time.Sleep(retry)
 				if this.reconnectMaxInterval > 0 && retry < this.reconnectMaxInterval {
 					retry = retry * 2
@@ -1306,16 +1305,19 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 						retry = this.reconnectMaxInterval
 					}
 				}
-				this.dial(retry, cherr)
-			}()
+			} else {
+				logger.Debugf("[dial] NO retry will be performed!")
+				return
+			}
 		} else {
-			logger.Debugf("[dial] NO retry will be performed!")
+			break
 		}
-		return
 	}
 
 	logger.Debugf("[dial] connected to %s with %s", this.addr, c.LocalAddr())
 
+	this.muconn.Lock()
+	defer this.muconn.Unlock()
 	// topic exchange
 	err = this.handshake(c)
 	if err != nil {

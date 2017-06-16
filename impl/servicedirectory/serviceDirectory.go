@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/quintans/gomsg"
+	"github.com/quintans/toolkit"
 	"github.com/quintans/toolkit/log"
 )
 
@@ -481,7 +482,7 @@ func (node *Peer) connectPeer(peerAddr string) error {
 			var wired = node.Put(w.Conn(), w.Wire())
 			if node.idleTimeout > 0 {
 				// disconnect connections idle for more than one minute
-				var debounce = gomsg.NewDebounce(node.idleTimeout, func(o interface{}) {
+				var debounce = toolkit.NewDebounce(node.idleTimeout, func(o interface{}) {
 					logger.Infof("Peer:Idle] %s: Closing idle connection to %s", node.name, peerAddr)
 					node.Kill(w.Conn())
 				})

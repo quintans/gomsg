@@ -110,41 +110,6 @@ func (this *Looper) HasNext() bool {
 	return this.cursor < this.max
 }
 
-type Debouncer struct {
-	input chan interface{}
-}
-
-func NewDebounce(interval time.Duration, f func(arg interface{})) *Debouncer {
-	var debounce = &Debouncer{}
-	debounce.input = make(chan interface{}, 10)
-
-	go func(input chan interface{}) {
-		var item interface{}
-		var ok bool
-		for {
-			select {
-			case item, ok = <-input:
-				if !ok {
-					return
-				}
-			case <-time.After(interval):
-				f(item)
-				return
-			}
-		}
-	}(debounce.input)
-
-	return debounce
-}
-
-func (debounce *Debouncer) Delay(item interface{}) {
-	debounce.input <- item
-}
-
-func (debounce *Debouncer) Kill() {
-	close(debounce.input)
-}
-
 // Timeout is a timer over a generic element, that will call a function when a specified timeout occurs.
 // It is possible to delay the timeout.
 type Timeout struct {

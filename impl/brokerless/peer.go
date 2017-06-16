@@ -1,5 +1,6 @@
 // THIS IS A WORK IN PROGRESS
 // based on http://zguide.zeromq.org/php:chapter8#Detecting-Disappearances
+
 package brokerless
 
 import (
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/quintans/gomsg"
+	"github.com/quintans/toolkit"
 	"github.com/quintans/toolkit/log"
 )
 
@@ -30,7 +32,7 @@ const (
 type node struct {
 	uuid      string
 	client    *gomsg.Client
-	debouncer *gomsg.Debouncer
+	debouncer *toolkit.Debouncer
 }
 
 type Peer struct {
@@ -129,7 +131,7 @@ func (peer *Peer) dropPeer(uuid string) {
 
 // healthCheckByIP is the client that checks actively the remote peer
 func (peer *Peer) healthCheckByTCP(n *node) {
-	n.debouncer = gomsg.NewDebounce(BeaconInterval*2, func(o interface{}) {
+	n.debouncer = toolkit.NewDebounce(BeaconInterval*2, func(o interface{}) {
 		peer.dropPeer(n.uuid)
 	})
 	go func() {
@@ -144,7 +146,7 @@ func (peer *Peer) healthCheckByTCP(n *node) {
 }
 
 func (peer *Peer) healthCheckByUDP(n *node) {
-	n.debouncer = gomsg.NewDebounce(BeaconInterval*2, func(o interface{}) {
+	n.debouncer = toolkit.NewDebounce(BeaconInterval*2, func(o interface{}) {
 		// the client did not responded, switching to TCP
 		logger.Infof("%X - Silent peer %s at %s. Switching to TCP ping", peer.uuid, n.uuid, n.client.Address())
 		peer.healthCheckByTCP(n)

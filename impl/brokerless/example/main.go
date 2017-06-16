@@ -15,7 +15,7 @@ func wait() {
 }
 
 func init() {
-	log.Register("/", log.INFO).ShowCaller(true)
+	log.Register("/", log.DEBUG).ShowCaller(true)
 }
 
 func uuid() []byte {
@@ -43,7 +43,8 @@ func main() {
 	})
 	cli2.Connect(":7002")
 
-	var cli3 = brokerless.NewPeer(uuid())
+	var uuid3 = uuid()
+	var cli3 = brokerless.NewPeer(uuid3)
 	// the same as cli2
 	cli3.Handle(SERVICE_GREETING, func(r *gomsg.Request) {
 		var greeting string
@@ -72,5 +73,9 @@ func main() {
 
 	cli3.Destroy()
 	fmt.Println("Waiting...")
+	time.Sleep(time.Second * 2)
+	// does it reconnect?
+	cli3 = brokerless.NewPeer(uuid3)
+	cli3.Connect(":7003")
 	time.Sleep(time.Second * 7)
 }

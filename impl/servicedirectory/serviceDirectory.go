@@ -414,12 +414,14 @@ func (node *Peer) Connect(bindAddr string, dirAddrs ...string) error {
 								node.name, w.Conn().RemoteAddr(), retries)
 							if retries == 0 {
 								ticker.Stop()
+								break
 							}
 						} else {
 							retries = node.PingFailures
 						}
 					} else {
 						ticker.Stop()
+						break
 					}
 				}
 				dir.Reconnect()

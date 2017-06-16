@@ -551,7 +551,6 @@ func (this *Wire) write(c net.Conn, msg Envelope) (err error) {
 
 	c.SetWriteDeadline(timeouttime(msg.timeout))
 
-	logger.Infof("===> Writing %s from %s to %s", msg.name, c.LocalAddr(), c.RemoteAddr())
 	buf := bufio.NewWriter(c)
 	w := NewOutputStream(buf)
 
@@ -1086,38 +1085,12 @@ type Client struct {
 // NewClient creates a Client
 func NewClient() *Client {
 	this := &Client{
-		wire:                 NewWire(JsonCodec{}),
 		reconnectInterval:    time.Millisecond * 10,
 		reconnectMaxInterval: time.Second,
 	}
 	this.timeout = time.Second * 10
 	this.handlers = make([]handler, 0)
 
-	this.wire.findHandlers = func(name string) []func(ctx *Request) {
-		this.muhnd.RLock()
-		defer this.muhnd.RUnlock()
-
-		return findHandlers(name, this.handlers)
-	}
-
-	this.wire.disconnected = func(c net.Conn, e error) {
-		this.muconn.Lock()
-		defer this.muconn.Unlock()
-
-		// Since this can be called from several places at the same time (reader goroutine, Reconnect(), ),
-		// we must check if it is still the same connection
-		if this.conn == c {
-			this.conn.Close()
-			if this.OnClose != nil {
-				this.OnClose(this.conn)
-			}
-			this.conn = nil
-			if this.reconnectInterval > 0 {
-				go this.dial(this.reconnectInterval, make(chan error, 1))
-			}
-		}
-
-	}
 	return this
 }
 
@@ -1263,15 +1236,9 @@ func (this *Client) Reconnect() <-chan error {
 }
 
 func (this *Client) Disconnect() {
-	this.muconn.Lock()
-	defer this.muconn.Unlock()
 
-	if this.conn != nil {
-		this.conn.Close()
-		if this.OnClose != nil {
-			this.OnClose(this.conn)
-		}
-		this.conn = nil
+	if this.wire != nil {
+		this.wire.disconnected(this.conn, nil)
 	}
 }
 
@@ -1318,12 +1285,42 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 
 	this.muconn.Lock()
 	defer this.muconn.Unlock()
+
+	this.wire = NewWire(JsonCodec{})
 	// topic exchange
 	err = this.handshake(c)
 	if err != nil {
 		logger.Errorf("[dial] error while handshaking: %s", err)
+		this.wire = nil
 		c.Close()
 	} else {
+		this.wire.findHandlers = func(name string) []func(ctx *Request) {
+			this.muhnd.RLock()
+			defer this.muhnd.RUnlock()
+
+			return findHandlers(name, this.handlers)
+		}
+
+		this.wire.disconnected = func(c net.Conn, e error) {
+			this.muconn.Lock()
+			defer this.muconn.Unlock()
+
+			// Since this can be called from several places at the same time (reader goroutine, Reconnect(), ),
+			// we must check if it is still the same connection
+			if this.conn == c {
+				this.wire.Destroy()
+				this.conn.Close()
+				if this.OnClose != nil {
+					this.OnClose(this.conn)
+				}
+				this.conn = nil
+				if this.reconnectInterval > 0 {
+					go this.dial(this.reconnectInterval, make(chan error, 1))
+				}
+			}
+
+		}
+
 		go this.wire.writer(c)
 		go this.wire.reader(c)
 		go this.wire.runHandler()
@@ -2036,9 +2033,9 @@ func (this *Server) Listen(service string) error {
 							logger.Errorf("[wire.disconnected] %s", faults.Wrap(e))
 						}
 
-						this.Wires.Kill(c)
+						this.Wires.Kill(conn)
 						if this.OnClose != nil {
-							this.OnClose(c)
+							this.OnClose(conn)
 						}
 						c = nil
 					}

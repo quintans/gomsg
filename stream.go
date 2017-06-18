@@ -19,7 +19,11 @@ func NewInputStream(reader io.Reader) *InputStream {
 	return this
 }
 
-func (this *InputStream) readBytes(size int) ([]byte, error) {
+func (this *InputStream) Read(p []byte) (n int, err error) {
+	return this.reader.Read(p)
+}
+
+func (this *InputStream) ReadNBytes(size int) ([]byte, error) {
 	var data = make([]byte, size)
 	if _, err := io.ReadFull(this.reader, data); err != nil {
 		return nil, faults.Wrap(err)
@@ -28,7 +32,7 @@ func (this *InputStream) readBytes(size int) ([]byte, error) {
 }
 
 func (this *InputStream) ReadUI8() (uint8, error) {
-	buf, err := this.readBytes(1)
+	buf, err := this.ReadNBytes(1)
 	if err != nil {
 		return 0, err
 	}
@@ -36,7 +40,7 @@ func (this *InputStream) ReadUI8() (uint8, error) {
 }
 
 func (this *InputStream) ReadUI16() (uint16, error) {
-	buf, err := this.readBytes(2)
+	buf, err := this.ReadNBytes(2)
 	if err != nil {
 		return 0, err
 	}
@@ -44,7 +48,7 @@ func (this *InputStream) ReadUI16() (uint16, error) {
 }
 
 func (this *InputStream) ReadUI32() (uint32, error) {
-	buf, err := this.readBytes(4)
+	buf, err := this.ReadNBytes(4)
 	if err != nil {
 		return 0, err
 	}
@@ -52,7 +56,7 @@ func (this *InputStream) ReadUI32() (uint32, error) {
 }
 
 func (this *InputStream) ReadUI64() (uint64, error) {
-	buf, err := this.readBytes(8)
+	buf, err := this.ReadNBytes(8)
 	if err != nil {
 		return 0, err
 	}
@@ -83,7 +87,7 @@ func (this *InputStream) ReadBytes() ([]byte, error) {
 	}
 
 	if size > 0 {
-		return this.readBytes(int(size))
+		return this.ReadNBytes(int(size))
 	}
 	return nil, nil
 }
@@ -97,6 +101,10 @@ type OutputStream struct {
 func NewOutputStream(writer io.Writer) *OutputStream {
 	this := &OutputStream{writer}
 	return this
+}
+
+func (this *OutputStream) Write(p []byte) (n int, err error) {
+	return this.writer.Write(p)
 }
 
 func (this *OutputStream) WriteUI8(data uint8) error {

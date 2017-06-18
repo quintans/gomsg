@@ -2,6 +2,7 @@ package gomsg
 
 import (
 	"errors"
+	"math/rand"
 	"net"
 	"sync"
 	"time"
@@ -210,4 +211,10 @@ func (kv *KeyValue) Delete(key interface{}) interface{} {
 		}
 	}
 	return nil
+}
+
+func NewUUID() []byte {
+	var b = make([]byte, 16)
+	rand.Read(b)
+	return b
 }

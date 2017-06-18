@@ -1,4 +1,5 @@
 // THIS IS A WORK IN PROGRESS
+// TODO in Peer the incoming messages should come by a gomsg.Client and the outgoing by a gomsg.Server
 //
 // This code demonstrates the use o gomsg to build a netwok of services.
 // We have directory nodes and peer nodes.
@@ -161,7 +162,7 @@ func NewDirectory(name string) *Directory {
 
 // notifyPeers notifies all peers, but the caller
 func (dir *Directory) notifyPeers(c net.Conn, topic string, payload interface{}) {
-	var self = dir.server.Get(c).Wire()
+	var self = dir.server.Get(c)
 	dir.server.SendSkip(self, gomsg.REQALL, topic, payload, nil, time.Second)
 }
 
@@ -203,7 +204,7 @@ func (dir *Directory) Listen(addr string) error {
 			dir.server.Kill(c)
 		}
 	})
-	dir.server.OnConnect = func(w *gomsg.Wired) {
+	dir.server.OnConnect = func(w *gomsg.Wire) {
 		// starts monitoring
 		timeout.Delay(w.Conn())
 	}
@@ -266,15 +267,14 @@ type Service struct {
 type Peer struct {
 	*gomsg.Wires
 
-	name       string
-	local      *gomsg.Server
-	dirs       *gomsg.Wires
-	remoteDirs []*gomsg.Client // exists only to hold the service server nodes
-	mu         sync.RWMutex
-	peers      map[string]*gomsg.Client
-	muServers  sync.RWMutex
-	providers  map[string]map[string]bool // list of all available endpoints for a service
-	services   map[string]bool            // the services that this node provides
+	name      string
+	local     *gomsg.Server
+	dirs      *gomsg.Wires
+	mu        sync.RWMutex
+	peers     map[string]*gomsg.Client
+	muServers sync.RWMutex
+	providers map[string]map[string]bool // list of all available endpoints for a service
+	services  map[string]bool            // the services that this node provides
 	// PingInterval is the interval to between peer pings
 	PingInterval time.Duration
 	// PingFailures is the number of times a ping can fail before the peer is considered offline
@@ -289,7 +289,6 @@ func NewPeer(name string) *Peer {
 		name:         name,
 		Wires:        gomsg.NewWires(gomsg.JsonCodec{}),
 		dirs:         gomsg.NewWires(gomsg.JsonCodec{}),
-		remoteDirs:   make([]*gomsg.Client, 0),
 		peers:        make(map[string]*gomsg.Client),
 		PingInterval: time.Second,
 		PingFailures: 2,
@@ -309,8 +308,8 @@ func NewPeer(name string) *Peer {
 
 // SetCodec sets the codec
 func (node *Peer) SetCodec(codec gomsg.Codec) *Peer {
-	node.Codec = codec
-	node.dirs.Codec = codec
+	node.Wires.SetCodec(codec)
+	node.dirs.SetCodec(codec)
 	return node
 }
 
@@ -337,11 +336,8 @@ func (node *Peer) Connect(bindAddr string, dirAddrs ...string) error {
 		return err
 	}
 
-	node.remoteDirs = make([]*gomsg.Client, len(dirAddrs))
-
-	for k, dirAddr := range dirAddrs {
+	for _, dirAddr := range dirAddrs {
 		var dir = gomsg.NewClient()
-		node.remoteDirs[k] = dir
 		dir.Handle(C_PEERREADY, func(provider Provider) {
 			logger.Infof("[Peer:Handle] %s: C_PEERREADY notified of a new peer: %+v", node.name, provider)
 
@@ -394,7 +390,7 @@ func (node *Peer) Connect(bindAddr string, dirAddrs ...string) error {
 			node.disconnectPeer(endpoint)
 		})
 
-		dir.OnConnect = func(w *gomsg.Wired) {
+		dir.OnConnect = func(w *gomsg.Wire) {
 
 			// this will ping the service directory,
 			// and if there is no reply after some attempts it will reconnect
@@ -427,7 +423,7 @@ func (node *Peer) Connect(bindAddr string, dirAddrs ...string) error {
 				dir.Reconnect()
 			}()
 
-			node.dirs.Put(w.Conn(), w.Wire())
+			node.dirs.Add(w)
 
 			node.mu.RLock()
 			var services = make([]string, len(node.services))
@@ -455,16 +451,6 @@ func (node *Peer) Connect(bindAddr string, dirAddrs ...string) error {
 
 		dir.OnClose = func(c net.Conn) {
 			node.dirs.Kill(c)
-			var a = node.remoteDirs
-			for k, v := range a {
-				if v.Connection() == c {
-					copy(a[k:], a[k+1:])
-					// since the slice has a non-primitive, we have to zero it
-					a[len(a)-1] = nil // zero it
-					node.remoteDirs = a[:len(a)-1]
-					break
-				}
-			}
 		}
 
 		dir.Connect(dirAddr)
@@ -478,17 +464,17 @@ func (node *Peer) connectPeer(peerAddr string) error {
 	defer node.mu.Unlock()
 
 	if node.peers[peerAddr] == nil {
-		cli := gomsg.NewClient().SetCodec(node.Codec)
+		cli := gomsg.NewClient().SetCodec(node.Codec())
 
-		cli.OnConnect = func(w *gomsg.Wired) {
-			var wired = node.Put(w.Conn(), w.Wire())
+		cli.OnConnect = func(w *gomsg.Wire) {
+			node.Add(w)
 			if node.idleTimeout > 0 {
 				// disconnect connections idle for more than one minute
 				var debounce = toolkit.NewDebounce(node.idleTimeout, func(o interface{}) {
 					logger.Infof("Peer:Idle] %s: Closing idle connection to %s", node.name, peerAddr)
 					node.Kill(w.Conn())
 				})
-				wired.AddSendListener(0, func(event gomsg.SendEvent) {
+				w.AddSendListener(0, func(event gomsg.SendEvent) {
 					debounce.Delay(w.Conn())
 				})
 			}
@@ -564,22 +550,13 @@ func (node *Peer) Destroy() {
 	if node.local != nil {
 		node.local.Destroy()
 	}
-	if node.remoteDirs != nil {
-		// calling destroy will eventually call OnClose
-		// where we are shrinking node.remoteDirs.
-		var a = append([]*gomsg.Client(nil), node.remoteDirs...)
-		for _, v := range a {
-			v.Destroy()
-		}
-	}
 
 	node.dirs.Destroy()
 	node.Wires.Destroy()
 
-	node.remoteDirs = nil
 	node.local = nil
-	node.dirs = nil
-	node.Wires = nil
+	//node.dirs = nil
+	//node.Wires = nil
 }
 
 // lazyConnect connects to relevant unconnected peers

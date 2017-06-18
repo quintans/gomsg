@@ -19,7 +19,7 @@ func wait() {
 }
 
 func init() {
-	log.Register("/", log.INFO).ShowCaller(true)
+	log.Register("/", log.DEBUG).ShowCaller(true)
 }
 
 func main() {
@@ -29,15 +29,17 @@ func main() {
 		fmt.Println("E:", err)
 		os.Exit(1)
 	}
-	var dir2 = servicedirectory.NewDirectory("DIR#2")
-	err = dir2.Listen(":7002")
-	if err != nil {
-		fmt.Println("E:", err)
-		os.Exit(1)
-	}
-	wait()
+	/*
+		var dir2 = servicedirectory.NewDirectory("DIR#2")
+		err = dir2.Listen(":7002")
+		if err != nil {
+			fmt.Println("E:", err)
+			os.Exit(1)
+		}
+		wait()
+	*/
 
-	var dirs = []string{"127.0.0.1:7001", "127.0.0.1:7002"}
+	var dirs = []string{"127.0.0.1:7001"}
 
 	fmt.Println("==== Adding peer #1 ====")
 	var peer1 = servicedirectory.NewPeer("Peer#1")
@@ -185,8 +187,8 @@ func main() {
 		fmt.Println("=====>", str)
 	}, time.Second)
 
-	fmt.Println("====== Drop DIR #2 =======")
-	dir2.Destroy() // removed from the cluster
+	//fmt.Println("====== Drop DIR #2 =======")
+	//dir2.Destroy() // removed from the cluster
 
 	fmt.Println("====== Drop Peer #2 =======")
 	peer2.Destroy() // removed from the cluster

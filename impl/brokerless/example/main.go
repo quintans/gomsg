@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"math/rand"
 	"time"
 
 	"github.com/quintans/gomsg"
@@ -18,12 +17,6 @@ func init() {
 	log.Register("/", log.INFO).ShowCaller(true)
 }
 
-func uuid() []byte {
-	var b = make([]byte, 16)
-	rand.Read(b)
-	return b
-}
-
 const (
 	SERVICE_GREETING = "GREETING"
 )
@@ -31,7 +24,7 @@ const (
 var codec = gomsg.JsonCodec{}
 
 func main() {
-	var cli1 = brokerless.NewPeer(uuid())
+	var cli1 = brokerless.NewPeer(gomsg.NewUUID())
 	cli1.Handle(SERVICE_GREETING, func(greeting string) string {
 		return "#1: hi " + greeting
 	})
@@ -45,7 +38,7 @@ func main() {
 		cli2.Connect(":7002")
 	*/
 
-	var uuid3 = uuid()
+	var uuid3 = gomsg.NewUUID()
 	var cli3 = brokerless.NewPeer(uuid3)
 	// the same as cli2
 	cli3.Handle(SERVICE_GREETING, func(r *gomsg.Request) {

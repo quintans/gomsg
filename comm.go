@@ -1974,6 +1974,7 @@ type Server struct {
 	*Wires
 
 	listener net.Listener
+	OnBind   func(net.Listener)
 }
 
 func NewServer() *Server {
@@ -2003,6 +2004,9 @@ func (this *Server) Listen(service string) error {
 		return err
 	}
 	this.listener = l
+	if this.OnBind != nil {
+		this.OnBind(l)
+	}
 	logger.Debugf("[Listen] listening at %s", l.Addr())
 	go func() {
 		for {

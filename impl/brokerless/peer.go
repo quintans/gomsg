@@ -49,9 +49,10 @@ type Peer struct {
 	// peers ones will be used to listen
 	peers map[string]*node
 	// the server will be used to send
-	server   *gomsg.Server
-	udpConn  *net.UDPConn
-	handlers map[string]interface{}
+	server       *gomsg.Server
+	udpConn      *net.UDPConn
+	handlers     map[string]interface{}
+	beaconTicker *toolkit.Ticker
 }
 
 func NewPeer(uuid []byte) *Peer {
@@ -79,9 +80,13 @@ func (peer *Peer) Connect(tcpAddr string) {
 	peer.server.Handle(PING, func() {})
 
 	peer.tcpAddr = tcpAddr
+	peer.serveUDP(UdpAddr, peer.beaconHandler)
+	peer.server.OnBind = func(l net.Listener) {
+		fmt.Println("==========> Binded")
+		peer.startBeacon(UdpAddr)
+	}
+
 	peer.server.Listen(tcpAddr)
-	peer.startBeacon(UdpAddr)
-	peer.serveMulticastUDP(UdpAddr, peer.beaconHandler)
 }
 
 func (peer *Peer) checkPeer(uuid string, addr string) {
@@ -214,6 +219,10 @@ func (peer *Peer) Destroy() {
 		v.client.Destroy()
 	}
 	peer.peers = make(map[string]*node)
+	if peer.beaconTicker != nil {
+		peer.beaconTicker.Stop()
+	}
+	peer.beaconTicker = nil
 }
 
 func (peer *Peer) startBeacon(a string) error {
@@ -233,21 +242,25 @@ func (peer *Peer) startBeacon(a string) error {
 	buf.WriteString(TAG)
 	buf.Write(peer.uuid)
 	buf.Write(buf16)
-	go func(data []byte) {
-		for peer.server.Listener() != nil {
-			c.Write(data)
-			time.Sleep(BeaconInterval)
-		}
-	}(buf.Bytes())
+
+	var data = buf.Bytes()
+	if peer.beaconTicker != nil {
+		peer.beaconTicker.Stop()
+	}
+	peer.beaconTicker = toolkit.NewDelayedTicker(0, BeaconInterval, func(t time.Time) {
+		c.Write(data)
+	})
+
 	return nil
 }
 
-func (peer *Peer) serveMulticastUDP(a string, hnd func(*net.UDPAddr, int, []byte)) error {
+func (peer *Peer) serveUDP(a string, hnd func(*net.UDPAddr, int, []byte)) error {
 	addr, err := net.ResolveUDPAddr("udp", a)
 	if err != nil {
 		return err
 	}
-	l, err := net.ListenMulticastUDP("udp", nil, addr)
+
+	l, err := net.ListenUDP("udp", addr)
 	if err != nil {
 		return err
 	}

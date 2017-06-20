@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/quintans/gomsg"
@@ -38,6 +39,8 @@ func main() {
 		cli2.Connect(":7002")
 	*/
 
+	wait()
+
 	var uuid3 = gomsg.NewUUID()
 	var cli3 = brokerless.NewPeer(uuid3)
 	// the same as cli2
@@ -51,13 +54,21 @@ func main() {
 	cli3.Connect(":7003")
 	wait()
 
+	time.Sleep(time.Second * 2)
+
+	var cnt = 0
 	<-cli1.RequestAll(SERVICE_GREETING, "#1", func(reply string) {
+		cnt++
 		var str = reply
 		if reply == "" {
 			str = "[END]"
 		}
 		fmt.Println("=====>", str)
 	})
+	if cnt != 2 {
+		fmt.Println("ERROR =====> expected 2, got", cnt)
+		os.Exit(1)
+	}
 
 	// replies should rotate
 	/*

@@ -83,6 +83,8 @@ var kind_labels = [...]string{
 
 type EKind uint8
 
+const noGROUP = ""
+
 func (this EKind) String() string {
 	idx := int(this)
 	if idx > 0 && idx <= len(kind_labels) {
@@ -91,8 +93,6 @@ func (this EKind) String() string {
 
 	return fmt.Sprint("unknown:", idx)
 }
-
-const FILTER_TOKEN = "*"
 
 var (
 	errorType   = reflect.TypeOf((*error)(nil)).Elem()    // interface type
@@ -348,6 +348,9 @@ type Wire struct {
 	remoteTopics    map[string]bool
 	onSendListeners map[uint64]SendListener
 	sendListenerIdx uint64
+
+	// load can be anything defined by the loadbalancer
+	load interface{}
 }
 
 func NewWire(codec Codec) *Wire {
@@ -516,6 +519,22 @@ func (this *Wire) SetTimeout(timeout time.Duration) {
 }
 
 func (this *Wire) Send(msg Envelope) <-chan error {
+	msg.errch = make(chan error, 1)
+	// check first if the peer has the topic before sending.
+	// This is done because remote topics are only available after a connection
+	if test(msg.kind, PUB, PUSH, REQ, REQALL) && !this.hasRemoteTopic(msg.name) {
+		msg.errch <- UnknownTopic(faults.New(UNKNOWNTOPIC, msg.name))
+		return msg.errch
+	}
+
+	return this.justsend(msg)
+}
+
+func (this *Wire) justsend(msg Envelope) <-chan error {
+	if msg.errch == nil {
+		msg.errch = make(chan error, 1)
+	}
+
 	// fires all registered listeners
 	this.fireSendListener(SendEvent{
 		Kind:    msg.kind,
@@ -524,16 +543,11 @@ func (this *Wire) Send(msg Envelope) <-chan error {
 		Handler: msg.handler,
 	})
 
-	msg.errch = make(chan error, 1)
-	// check first if the peer has the topic before sending.
-	// This is done because remote topics are only available after a connection
-	if test(msg.kind, PUB, PUSH, REQ, REQALL) && !this.hasRemoteTopic(msg.name) {
-		msg.errch <- UnknownTopic(faults.New(UNKNOWNTOPIC, msg.name))
-	} else { // SUB, UNSUB
-		msg.sequence = atomic.AddUint32(&this.sequence, 1)
-		//msg.sequence = randomSeq()
-		this.enqueue(msg)
-	}
+	// SUB, UNSUB
+	msg.sequence = atomic.AddUint32(&this.sequence, 1)
+	//msg.sequence = randomSeq()
+	this.enqueue(msg)
+
 	return msg.errch
 }
 
@@ -1493,23 +1507,12 @@ func (this *Client) Send(kind EKind, name string, payload interface{}, handler i
 type Wires struct {
 	mu              sync.RWMutex
 	wires           []*Wire
-	groups          map[string]*Group
+	groups          map[string][]*Wire
 	cursor          int
-	stickies        *Filter
 	codec           Codec
 	onSendListeners map[uint64]SendListener
 	sendListenerIdx uint64
-}
-
-type Group struct {
-	wires  []*Wire
-	cursor int
-}
-
-type sticky struct {
-	duration time.Duration
-	timeout  time.Time
-	lastWire *Wire
+	loadBalancer    LoadBalancer
 }
 
 type SendListener func(event SendEvent)
@@ -1545,21 +1548,19 @@ func (this *Wires) fireSendListener(event SendEvent) {
 func NewWires(codec Codec) *Wires {
 	return &Wires{
 		wires:           make([]*Wire, 0),
-		groups:          make(map[string]*Group),
-		stickies:        NewFilter(),
+		groups:          make(map[string][]*Wire),
 		codec:           codec,
 		onSendListeners: make(map[uint64]SendListener),
+		loadBalancer:    NewSimpleLB(),
 	}
 }
 
-// Stick forces the messages to go to the same wire (in a multi wire cenario)
-// if the time between messages is smaller than the duration argument.
-func (this *Wires) Stick(name string, duration time.Duration) {
-	if duration == time.Duration(0) {
-		this.stickies.Delete(name)
-	} else {
-		this.stickies.Put(name, &sticky{duration: duration})
-	}
+func (this *Wires) SetLoadBalancer(loadBalancer LoadBalancer) {
+	this.loadBalancer = loadBalancer
+}
+
+func (this *Wires) LoadBalancer() LoadBalancer {
+	return this.loadBalancer
 }
 
 func (this *Wires) SetCodec(codec Codec) *Wires {
@@ -1587,8 +1588,7 @@ func (this *Wires) Destroy() {
 		v.Destroy()
 	}
 	this.wires = make([]*Wire, 0)
-	this.groups = make(map[string]*Group)
-	this.stickies = NewFilter()
+	this.groups = make(map[string][]*Wire)
 	this.onSendListeners = make(map[uint64]SendListener)
 	atomic.StoreUint64(&this.sendListenerIdx, 0)
 	this.cursor = 0
@@ -1609,12 +1609,13 @@ func (this *Wires) Add(wire *Wire) {
 	wire.codec = this.codec
 
 	this.wires = append(this.wires, wire)
-	group := this.groups[wire.remoteGroupID]
+	this.loadBalancer.Add(wire)
+
+	var group = this.groups[wire.remoteGroupID]
 	if group == nil {
-		group = &Group{make([]*Wire, 0), 0}
-		this.groups[wire.remoteGroupID] = group
+		group = make([]*Wire, 0)
 	}
-	group.wires = append(group.wires, wire)
+	this.groups[wire.remoteGroupID] = append(group, wire)
 }
 
 func (this *Wires) Get(conn net.Conn) *Wire {
@@ -1642,16 +1643,11 @@ func (this *Wires) Kill(conn net.Conn) {
 	var w *Wire
 	this.wires, w = remove(conn, this.wires)
 	if w != nil {
+		this.loadBalancer.Remove(w)
+
 		var group = this.groups[w.remoteGroupID]
 		if group != nil {
-			group.wires, _ = remove(conn, group.wires)
-		}
-		// remove from stikies
-		for _, v := range this.stickies.Items {
-			var s = v.Value.(*sticky)
-			if s.lastWire == w {
-				s.lastWire = nil
-			}
+			this.groups[w.remoteGroupID], _ = remove(conn, group)
 		}
 		w.Destroy()
 	}
@@ -1661,81 +1657,24 @@ func (this *Wires) Kill(conn net.Conn) {
 func remove(conn net.Conn, wires []*Wire) ([]*Wire, *Wire) {
 	for k, v := range wires {
 		if v.conn == conn {
-			// since the slice has a non-primitive, we have to zero it
-			copy(wires[k:], wires[k+1:])
-			wires[len(wires)-1] = nil // zero it
-			wires = wires[:len(wires)-1]
-			return wires, v
+			return removeWire(wires, k), v
 		}
 	}
 	return wires, nil
 }
 
-func rotate(wires []*Wire, cur int) int {
-	cur++
-	if cur >= len(wires) {
-		cur = 0
-	}
-	return cur
+func removeWire(wires []*Wire, k int) []*Wire {
+	// since the slice has a non-primitive, we have to zero it
+	copy(wires[k:], wires[k+1:])
+	wires[len(wires)-1] = nil // zero it
+	return wires[:len(wires)-1]
 }
 
-func (this *Wires) GetAll() ([]*Wire, int) {
+func (this *Wires) GetAll() []*Wire {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 
-	this.cursor = rotate(this.wires, this.cursor)
-	return clone(this.wires), this.cursor
-}
-
-func (this *Wires) stickyTimeout(name string, wires []*Wire, cur int) (int, bool) {
-	if len(wires) == 0 {
-		return cur, true
-	}
-
-	// find sticky filter that intercepts name
-	var match = this.stickies.Match(name)
-	if match == nil {
-		return rotate(wires, cur), true
-	}
-
-	var stick = match.(*sticky)
-
-	var timeout = stick.timeout == time.Time{} ||
-		time.Now().After(stick.timeout)
-	stick.timeout = time.Now().Add(stick.duration)
-
-	if timeout {
-		cur = rotate(wires, cur)
-		stick.lastWire = wires[cur]
-		return cur, true
-	}
-
-	// find cursor for last used wire
-	for k, v := range wires {
-		if v == stick.lastWire {
-			return k, false
-		}
-	}
-	// if we are here, the lastWire is invalid
-	stick.lastWire = nil
-
-	return cur, true
-}
-
-func (this *Wires) Rotate(name string) ([]*Wire, int) {
-	this.mu.Lock()
-	defer this.mu.Unlock()
-
-	var cur, ok = this.stickyTimeout(name, this.wires, this.cursor)
-	var ws []*Wire
-	// we clone because iterate over the wires can take a long time,
-	// and we don't whant to lock the list wires for a long time.
-	ws = clone(this.wires)
-	// updates original cursor position if rotates
-	if ok {
-		this.cursor = cur
-	}
-	return ws, cur
+	return clone(this.wires)
 }
 
 func clone(wires []*Wire) []*Wire {
@@ -1744,25 +1683,6 @@ func clone(wires []*Wire) []*Wire {
 	copy(w, wires)
 
 	return w
-}
-
-// RotateGroups rotates groups
-func (this *Wires) RotateGroups(name string) map[string]*Group {
-	this.mu.Lock()
-	defer this.mu.Unlock()
-
-	newMap := make(map[string]*Group)
-	for k, v := range this.groups {
-		var cur, ok = this.stickyTimeout(name, v.wires, v.cursor)
-		var ws = clone(v.wires)
-		// updates original cursor position if rotates
-		if ok {
-			v.cursor = cur
-		}
-		newMap[k] = &Group{ws, cur}
-	}
-
-	return newMap
 }
 
 func (this *Wires) Size() int {
@@ -1808,6 +1728,23 @@ func (this *Wires) Send(kind EKind, name string, payload interface{}, handler in
 	return this.SendSkip(nil, kind, name, payload, handler, timeout)
 }
 
+func (this *Wires) send(w *Wire, msg Envelope) <-chan error {
+	this.loadBalancer.BeforeSend(w, msg)
+	defer this.loadBalancer.AfterSend(w, msg)
+	return w.justsend(msg)
+}
+
+func wiresTriage(name string, wires []*Wire, skipWire *Wire) []*Wire {
+	var ws = make([]*Wire, 0)
+	for _, w := range wires {
+		// does not send to self
+		if (skipWire == nil || skipWire != w) && w.hasRemoteTopic(name) {
+			ws = append(ws, w)
+		}
+	}
+	return ws
+}
+
 // SendSkip is the generic function to send messages with the possibility of ignoring the sender
 func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload interface{}, handler interface{}, timeout time.Duration) <-chan error {
 	msg, err := createEnvelope(kind, name, payload, handler, timeout, this.codec)
@@ -1828,53 +1765,46 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 	err = UnknownTopic(faults.New(UNKNOWNTOPIC, msg.name))
 	if msg.kind == PUSH || msg.kind == REQ {
 		go func() {
-			var ws, cursor = this.Rotate(name)
-			l := NewLooper(cursor, len(ws))
-			for l.HasNext() {
-				var w = ws[l.Next()]
-				// does not send to self
-				if skipWire == nil || skipWire != w {
-					// REQ can also receive multiple messages from ONE replier
-					err = <-w.Send(msg)
-					// exit on success
-					if err == nil {
-						break
-					}
+			var wires = wiresTriage(name, this.wires, skipWire)
+			var size = len(wires)
+			for i := 0; i < size; i++ {
+				var w = this.loadBalancer.Next(name, wires)
+				// REQ can also receive multiple messages from ONE replier
+				err = <-this.send(w, msg)
+				// exit on success
+				if err == nil {
+					break
+				} else {
+					this.loadBalancer.Error(w, msg, err)
 				}
 			}
 			errch <- err
 		}()
 	} else if msg.kind == PUB {
 		go func() {
-			// collects wires into groups.
-			var groups = this.RotateGroups(name)
-			for id, group := range groups {
-				if id == "" {
-					l := NewLooper(group.cursor, len(group.wires))
-					for l.HasNext() {
-						var wire = group.wires[l.Next()]
-						// do not send to self
-						if skipWire == nil || skipWire != wire {
-							e := <-wire.Send(msg)
-							if e == nil {
-								err = nil
-							}
+			for id, group := range this.groups {
+				if id == noGROUP {
+					for _, w := range wiresTriage(name, group, skipWire) {
+						e := <-this.send(w, msg)
+						if e == nil {
+							err = nil
+						} else {
+							this.loadBalancer.Error(w, msg, e)
 						}
 					}
 				} else {
-					go func(grp *Group) {
-						l := NewLooper(grp.cursor, len(grp.wires))
-						for l.HasNext() {
-							var wire = grp.wires[l.Next()]
-							// do not send to self
-							if skipWire == nil || skipWire != wire {
-								e := <-wire.Send(msg)
-								// send only to one.
-								// stop if there was a success.
-								if e == nil {
-									err = nil
-									break
-								}
+					go func(wires []*Wire) {
+						var ws = wiresTriage(name, wires, skipWire)
+						var size = len(ws)
+						for i := 0; i < size; i++ {
+							var w = this.loadBalancer.Next(name, ws)
+							e := <-this.send(w, msg)
+							// send only to one.
+							// stop if there was a success.
+							if e == nil {
+								break
+							} else {
+								this.loadBalancer.Error(w, msg, e)
 							}
 						}
 					}(group)
@@ -1906,48 +1836,43 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 		}
 
 		// collects wires into groups.
-		var groups = this.RotateGroups(name)
-		for id, group := range groups {
-			if id == "" {
-				l := NewLooper(group.cursor, len(group.wires))
-				for l.HasNext() {
-					var w = group.wires[l.Next()]
-					// do not send to self
-					if skipWire == nil || skipWire != w {
-						// increment reply counter
-						logger.Debugf("[SendSkip] sending message to %s (ungrouped)", w.Conn().RemoteAddr())
-						wg.Add(1)
-						ch := w.Send(msg)
-						go func() {
-							// waits for the request completion
-							e := <-ch
-							if e == nil {
-								err = nil // at least one got through
-							} else {
-								logger.Infof("[SendSkip] %s", e)
-							}
-							wg.Done()
-						}()
-					}
+		for id, group := range this.groups {
+			if id == noGROUP {
+				for _, w := range wiresTriage(name, group, skipWire) {
+					// increment reply counter
+					logger.Debugf("[SendSkip] sending message to %s (ungrouped)", w.Conn().RemoteAddr())
+					wg.Add(1)
+					ch := this.send(w, msg)
+					go func() {
+						// waits for the request completion
+						e := <-ch
+						if e == nil {
+							err = nil // at least one got through
+						} else {
+							this.loadBalancer.Error(w, msg, e)
+							logger.Errorf("[SendSkip] %s", e)
+						}
+						wg.Done()
+					}()
 				}
 			} else {
 				// increment reply counter
 				wg.Add(1)
-				go func(grp *Group) {
-					l := NewLooper(grp.cursor, len(grp.wires))
-					for l.HasNext() {
-						var w = grp.wires[l.Next()]
-						// do not send to self
-						if skipWire == nil || skipWire != w {
-							logger.Debugf("[SendSkip] sending message to %s (group %s)", w.Conn().RemoteAddr(), id)
-							// waits for the request completion
-							e := <-w.Send(msg)
-							// send only to one.
-							// stop if there was a success.
-							if e == nil {
-								err = nil
-								break
-							}
+				go func(wires []*Wire) {
+					var ws = wiresTriage(name, wires, skipWire)
+					var size = len(ws)
+					for i := 0; i < size; i++ {
+						var w = this.loadBalancer.Next(name, ws)
+						logger.Debugf("[SendSkip] sending message to %s (group %s)", w.Conn().RemoteAddr(), id)
+						// waits for the request completion
+						e := <-this.send(w, msg)
+						// send only to one.
+						// stop if there was a success.
+						if e == nil {
+							err = nil
+							break
+						} else {
+							this.loadBalancer.Error(w, msg, e)
 						}
 					}
 					wg.Done()
@@ -2144,10 +2069,8 @@ func (this *Server) Handle(name string, fun interface{}) {
 	this.addHandler(name, hnd)
 
 	msg, _ := createEnvelope(SUB, name, nil, nil, this.timeout, this.codec)
-	ws, cursor := this.Wires.GetAll()
-	l := NewLooper(cursor, len(ws))
-	for l.HasNext() {
-		w := ws[l.Next()]
+	var ws = this.Wires.GetAll()
+	for _, w := range ws {
 		w.Send(msg)
 	}
 }
@@ -2181,10 +2104,8 @@ func (this *Server) Cancel(name string) {
 	this.removeHandler(name)
 
 	msg, _ := createEnvelope(UNSUB, name, nil, nil, this.timeout, this.codec)
-	ws, cursor := this.Wires.GetAll()
-	l := NewLooper(cursor, len(ws))
-	for l.HasNext() {
-		w := ws[l.Next()]
+	var ws = this.Wires.GetAll()
+	for _, w := range ws {
 		w.Send(msg)
 	}
 }
@@ -2271,25 +2192,17 @@ func isClosed(e error) bool {
 	return false
 }
 
-type Filter struct {
-	*KeyValue
-}
-
-func NewFilter() *Filter {
-	return &Filter{NewKeyValue()}
-}
-
-func (filter *Filter) Match(name string) interface{} {
-	// find key filter that intercepts name
-	for _, item := range filter.Items {
-		var s = item.Key.(string)
-		if strings.HasSuffix(s, FILTER_TOKEN) {
-			if strings.HasPrefix(name, s[:len(s)-1]) {
-				return item.Value
-			}
-		} else if name == s {
-			return item.Value
-		}
-	}
-	return nil
+type LoadBalancer interface {
+	// Add is called when a new wire is created
+	Add(*Wire)
+	// Remove is called when the wire is killed
+	Remove(*Wire)
+	// BeforeSend is called before the message is sent
+	BeforeSend(*Wire, Envelope)
+	// AfterSend is called after the message is sent
+	AfterSend(*Wire, Envelope)
+	// Error frees a wire in error
+	Error(*Wire, Envelope, error)
+	//
+	Next(string, []*Wire) *Wire
 }

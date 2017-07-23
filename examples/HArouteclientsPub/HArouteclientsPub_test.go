@@ -2,12 +2,13 @@ package main
 
 import (
 	"fmt"
+	"testing"
 	"time"
 
 	"github.com/quintans/gomsg"
 )
 
-func main() {
+func TestHA(t *testing.T) {
 	// all messages arriving to the server are routed to the clients
 	server := gomsg.NewServer()
 	server.Listen(":7777")
@@ -59,17 +60,17 @@ func main() {
 	wait()
 
 	if ungrouped != 4 {
-		fmt.Println("ERROR: RECEIVED", ungrouped, "UNGROUPED EVENTS. EXPECTED 4.")
+		t.Fatal("ERROR: RECEIVED", ungrouped, "UNGROUPED EVENTS. EXPECTED 4.")
 	}
 	if group1 != 2 {
-		fmt.Println("ERROR: RECEIVED", group1, "GROUP EVENTS. EXPECTED 2.")
+		t.Fatal("ERROR: RECEIVED", group1, "GROUP EVENTS. EXPECTED 2.")
 	}
 	if group2 != 2 {
-		fmt.Println("ERROR: RECEIVED", group2, "GROUP EVENTS. EXPECTED 2.")
+		t.Fatal("ERROR: RECEIVED", group2, "GROUP EVENTS. EXPECTED 2.")
 	}
 	wait()
 	cli.Destroy()
-	wait()
+	//wait()
 }
 
 func wait() {

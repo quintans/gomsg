@@ -23,8 +23,7 @@ func createClient(reply string) *gomsg.Client {
 	cli.Handle(TOPIC, func() string {
 		return reply
 	})
-	cli.Connect("localhost:7777")
-	wait()
+	<-cli.Connect("localhost:7777")
 	return cli
 }
 
@@ -38,17 +37,15 @@ func main() {
 	createClient("Three")
 	createClient("Four")
 
-	wait()
-
-	for i := 0; i < 1000; i++ {
-		server.RequestAll(TOPIC, "X", func(s string) {
+	var now = time.Now()
+	for i := 0; i < 10000; i++ {
+		<-server.RequestAll(TOPIC, "X", func(s string) {
 			var str = s
 			if s == "" {
 				str = "[END]"
 			}
 			fmt.Println("=====>", str)
 		}, time.Second)
-
-		wait()
 	}
+	fmt.Println(time.Now().Sub(now))
 }

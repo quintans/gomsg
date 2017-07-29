@@ -44,6 +44,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/quintans/toolkit"
 	"github.com/quintans/toolkit/faults"
 	"github.com/quintans/toolkit/log"
 )
@@ -102,7 +103,6 @@ var (
 
 // errors
 var (
-	DROPPED   = errors.New("Message was Droped. Wire is closed or full.")
 	NOCODEC   = errors.New("No codec defined")
 	EOR       = errors.New("End Of Multiple Reply")
 	NACKERROR = errors.New("Not Acknowledge Error")
@@ -351,6 +351,9 @@ type Wire struct {
 
 	// load can be anything defined by the loadbalancer
 	load interface{}
+
+	rateLimiter toolkit.Rate
+	bufferSize  int
 }
 
 func NewWire(codec Codec) *Wire {
@@ -361,9 +364,18 @@ func NewWire(codec Codec) *Wire {
 		codec:           codec,
 		remoteTopics:    make(map[string]bool),
 		onSendListeners: make(map[uint64]SendListener),
+		bufferSize:      1000,
 	}
 
 	return wire
+}
+
+func (this *Wire) SetBufferSize(size int) {
+	this.bufferSize = size
+}
+
+func (this *Wire) SetRateLimiter(limiter toolkit.Rate) {
+	this.rateLimiter = limiter
 }
 
 // Conn gets the connection
@@ -395,8 +407,8 @@ func (this *Wire) SetConn(c net.Conn) {
 	this.stop()
 	if c != nil {
 		this.conn = c
-		this.chin = make(chan Envelope, 1000)
-		this.handlerch = make(chan EnvelopeConn, 1000)
+		this.chin = make(chan Envelope, this.bufferSize)
+		this.handlerch = make(chan EnvelopeConn, this.bufferSize)
 		go this.writer(c)
 		go this.reader(c)
 		go this.runHandler()
@@ -551,24 +563,19 @@ func (this *Wire) justsend(msg Envelope) <-chan error {
 	return msg.errch
 }
 
-func (this *Wire) enqueue(msg Envelope) bool {
-	ok := true
-	select {
-	case this.chin <- msg:
-	default:
-		ok = false
-		msg.errch <- DROPPED
+func (this *Wire) enqueue(msg Envelope) {
+	if this.rateLimiter != nil {
+		this.rateLimiter.TakeN(1)
 	}
-	return ok
+	this.chin <- msg
 }
 
 func (this *Wire) reply(kind EKind, seq uint32, payload []byte) {
 	msg := this.NewReplyEnvelope(kind, seq, payload)
-	if this.enqueue(msg) {
-		err := <-msg.errch
-		if err != nil {
-			this.Destroy()
-		}
+	this.enqueue(msg)
+	err := <-msg.errch
+	if err != nil {
+		this.Destroy()
 	}
 }
 
@@ -715,11 +722,10 @@ loop:
 					this.deleteRemoteTopic(name)
 				}
 				msg := this.NewReplyEnvelope(ACK, seq, nil)
-				if this.enqueue(msg) {
-					err = <-msg.errch
-					if err != nil {
-						break
-					}
+				this.enqueue(msg)
+				err = <-msg.errch
+				if err != nil {
+					break
 				}
 
 			} else {
@@ -1193,6 +1199,14 @@ func NewClient() *Client {
 	return this
 }
 
+func (this *Client) SetBufferSize(size int) {
+	this.wire.bufferSize = size
+}
+
+func (this *Client) SetRateLimiter(limiter toolkit.Rate) {
+	this.wire.SetRateLimiter(limiter)
+}
+
 func (this *Client) SetReconnectInterval(reconnectInterval time.Duration) *Client {
 	this.reconnectInterval = reconnectInterval
 	return this
@@ -1505,14 +1519,16 @@ func (this *Client) Send(kind EKind, name string, payload interface{}, handler i
 // This means that we only need to call one of them.
 // The other nodes function as High Availability and load balancing nodes
 type Wires struct {
-	mu              sync.RWMutex
-	wires           []*Wire
-	groups          map[string][]*Wire
-	cursor          int
-	codec           Codec
-	onSendListeners map[uint64]SendListener
-	sendListenerIdx uint64
-	loadBalancer    LoadBalancer
+	mu                 sync.RWMutex
+	wires              []*Wire
+	groups             map[string][]*Wire
+	cursor             int
+	codec              Codec
+	onSendListeners    map[uint64]SendListener
+	sendListenerIdx    uint64
+	loadBalancer       LoadBalancer
+	rateLimiterFactory func() toolkit.Rate
+	bufferSize         int
 }
 
 type SendListener func(event SendEvent)
@@ -1552,7 +1568,16 @@ func NewWires(codec Codec) *Wires {
 		codec:           codec,
 		onSendListeners: make(map[uint64]SendListener),
 		loadBalancer:    NewSimpleLB(),
+		bufferSize:      1000,
 	}
+}
+
+func (this *Wires) SetBufferSize(size int) {
+	this.bufferSize = size
+}
+
+func (this *Wires) SetRateLimiterFactory(factory func() toolkit.Rate) {
+	this.rateLimiterFactory = factory
 }
 
 func (this *Wires) SetLoadBalancer(loadBalancer LoadBalancer) {
@@ -1607,7 +1632,9 @@ func (this *Wires) Add(wire *Wire) {
 
 	// set common codec
 	wire.codec = this.codec
-
+	if this.rateLimiterFactory != nil {
+		wire.rateLimiter = this.rateLimiterFactory()
+	}
 	this.wires = append(this.wires, wire)
 	this.loadBalancer.Add(wire)
 
@@ -1916,6 +1943,14 @@ func (this *Server) BindPort() int {
 		return this.listener.Addr().(*net.TCPAddr).Port
 	}
 	return 0
+}
+
+func (this *Server) SetBufferSize(size int) {
+	this.Wires.SetBufferSize(size)
+}
+
+func (this *Server) SetRateLimiterFactory(factory func() toolkit.Rate) {
+	this.Wires.SetRateLimiterFactory(factory)
 }
 
 func (this *Server) Listener() net.Listener {

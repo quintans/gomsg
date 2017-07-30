@@ -1811,23 +1811,23 @@ func (this *Wires) Kill(conn net.Conn) {
 	var w *Wire
 	this.wires, w = remove(conn, this.wires)
 
-	// define trigger on drop topic
-	w.OnDropTopic = func(topic string) {
-		for _, w := range this.wires {
-			// if still exists ignore
-			if w.hasRemoteTopic(topic) {
-				return
-			}
-		}
-		this.fireDropTopicListener(topic)
-	}
-
-	for k := range w.remoteTopics {
-		// use trigger
-		w.OnDropTopic(k)
-	}
-
 	if w != nil {
+		// define trigger on drop topic
+		w.OnDropTopic = func(topic string) {
+			for _, w := range this.wires {
+				// if still exists ignore
+				if w.hasRemoteTopic(topic) {
+					return
+				}
+			}
+			this.fireDropTopicListener(topic)
+		}
+
+		for k := range w.remoteTopics {
+			// use trigger
+			w.OnDropTopic(k)
+		}
+
 		this.loadBalancer.Remove(w)
 
 		var group = this.groups[w.remoteGroupID]

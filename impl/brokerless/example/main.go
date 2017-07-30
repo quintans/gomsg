@@ -25,7 +25,8 @@ const (
 var codec = gomsg.JsonCodec{}
 
 func main() {
-	var cli1 = brokerless.NewPeer(gomsg.NewUUID())
+	var cfg = brokerless.Config{Uuid: gomsg.NewUUID()}
+	var cli1 = brokerless.NewPeer(cfg)
 	cli1.Handle(SERVICE_GREETING, func(greeting string) string {
 		return "#1: hi " + greeting
 	})
@@ -42,7 +43,8 @@ func main() {
 	wait()
 
 	var uuid3 = gomsg.NewUUID()
-	var cli3 = brokerless.NewPeer(uuid3)
+	var cfg3 = brokerless.Config{Uuid: uuid3}
+	var cli3 = brokerless.NewPeer(cfg3)
 	// the same as cli2
 	cli3.Handle(SERVICE_GREETING, func(r *gomsg.Request) {
 		var greeting string
@@ -83,7 +85,7 @@ func main() {
 	fmt.Println("Waiting...")
 	time.Sleep(time.Second * 2)
 	// does it reconnect?
-	cli3 = brokerless.NewPeer(uuid3)
+	cli3 = brokerless.NewPeer(cfg3)
 	cli3.Connect(":7003")
 	time.Sleep(time.Second * 7)
 }

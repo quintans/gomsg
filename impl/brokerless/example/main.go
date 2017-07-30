@@ -38,6 +38,9 @@ func main() {
 		greet++
 		return "#1: hi " + greeting
 	})
+	cli1.AddNewTopicListener(func(name string) {
+		fmt.Println("=====> #1: remote topic: ", name)
+	})
 	cli1.Connect(":7001")
 
 	/*
@@ -54,7 +57,7 @@ func main() {
 	var cfg3 = brokerless.Config{Uuid: uuid3}
 	var cli3 = brokerless.NewPeer(cfg3)
 	cli3.Handle(SERVICE_GREETING, mw, func(r *gomsg.Request) {
-		fmt.Println(">>>>> Calling SERVICE_GREETING #3 <<<<<")
+		fmt.Println("=====> Calling SERVICE_GREETING #3")
 		greet++
 		var greeting string
 		codec.Decode(r.Payload(), &greeting)

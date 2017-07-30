@@ -62,5 +62,5 @@ func main() {
 	}
 	wg.Wait()
 	var delta = time.Now().Sub(now)
-	fmt.Printf("replied %v in %v\n", replies, delta)
+	fmt.Printf("1000 requests => %v replies in %v\n", replies, delta)
 }

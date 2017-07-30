@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/quintans/gomsg"
@@ -57,6 +58,7 @@ func main() {
 	cli.Destroy()
 	server.Destroy()
 	time.Sleep(time.Second * 2)
+	os.Exit(0)
 }
 
 func reverse(m string) string {

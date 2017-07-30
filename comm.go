@@ -402,6 +402,9 @@ func (this *Wire) Conn() net.Conn {
 }
 
 func (this *Wire) SetConn(c net.Conn) {
+	this.mucb.Lock()
+	defer this.mucb.Unlock()
+
 	this.stop()
 	if c != nil {
 		this.conn = c
@@ -572,6 +575,8 @@ func (this *Wire) enqueue(msg Envelope) {
 	if this.rateLimiter != nil {
 		this.rateLimiter.TakeN(1)
 	}
+	this.mucb.Lock()
+	defer this.mucb.Unlock()
 	this.chin <- msg
 }
 
@@ -1618,7 +1623,8 @@ func (this *Client) Send(kind EKind, name string, payload interface{}, handler i
 // This means that we only need to call one of them.
 // The other nodes function as High Availability and load balancing nodes
 type Wires struct {
-	mu                 sync.RWMutex
+	sync.RWMutex
+
 	wires              []*Wire
 	groups             map[string][]*Wire
 	cursor             int
@@ -1674,8 +1680,8 @@ func (this *Wires) fireSendListener(event SendEvent) {
 }
 
 func (this *Wires) AddNewTopicListener(listener func(string)) uint64 {
-	this.mu.Lock()
-	defer this.mu.Unlock()
+	this.Lock()
+	defer this.Unlock()
 
 	var idx = atomic.AddUint64(&this.listenersIdx, 1)
 	this.newTopicListeners[idx] = listener
@@ -1684,24 +1690,21 @@ func (this *Wires) AddNewTopicListener(listener func(string)) uint64 {
 
 // RemoveSendListener removes a previously added listener on send messages
 func (this *Wires) RemoveNewTopicListener(idx uint64) {
-	this.mu.Lock()
-	defer this.mu.Unlock()
+	this.Lock()
+	defer this.Unlock()
 
 	delete(this.newTopicListeners, idx)
 }
 
 func (this *Wires) fireNewTopicListener(topic string) {
-	this.mu.RLock()
-	defer this.mu.RUnlock()
-
 	for _, listener := range this.newTopicListeners {
 		listener(topic)
 	}
 }
 
 func (this *Wires) AddDropTopicListener(listener func(string)) uint64 {
-	this.mu.Lock()
-	defer this.mu.Unlock()
+	this.Lock()
+	defer this.Unlock()
 
 	var idx = atomic.AddUint64(&this.listenersIdx, 1)
 	this.dropTopicListeners[idx] = listener
@@ -1710,16 +1713,13 @@ func (this *Wires) AddDropTopicListener(listener func(string)) uint64 {
 
 // RemoveSendListener removes a previously added listener on send messages
 func (this *Wires) RemoveDropTopicListener(idx uint64) {
-	this.mu.Lock()
-	defer this.mu.Unlock()
+	this.Lock()
+	defer this.Unlock()
 
 	delete(this.dropTopicListeners, idx)
 }
 
 func (this *Wires) fireDropTopicListener(topic string) {
-	this.mu.RLock()
-	defer this.mu.RUnlock()
-
 	for _, listener := range this.dropTopicListeners {
 		listener(topic)
 	}
@@ -1742,8 +1742,8 @@ func (this *Wires) LoadBalancer() LoadBalancer {
 }
 
 func (this *Wires) SetCodec(codec Codec) *Wires {
-	this.mu.Lock()
-	defer this.mu.Unlock()
+	this.Lock()
+	defer this.Unlock()
 
 	this.codec = codec
 	for _, v := range this.wires {
@@ -1759,8 +1759,8 @@ func (this *Wires) Codec() Codec {
 }
 
 func (this *Wires) Destroy() {
-	this.mu.Lock()
-	defer this.mu.Unlock()
+	this.Lock()
+	defer this.Unlock()
 
 	for _, v := range this.wires {
 		v.Destroy()
@@ -1775,8 +1775,8 @@ func (this *Wires) Destroy() {
 }
 
 func (this *Wires) Add(wire *Wire) {
-	this.mu.Lock()
-	defer this.mu.Unlock()
+	this.Lock()
+	defer this.Unlock()
 
 	// if already defined (same connection) panics
 	for _, v := range this.wires {
@@ -1824,8 +1824,8 @@ func (this *Wires) Get(conn net.Conn) *Wire {
 }
 
 func (this *Wires) Find(fn func(w *Wire) bool) *Wire {
-	this.mu.Lock()
-	defer this.mu.Unlock()
+	this.Lock()
+	defer this.Unlock()
 
 	for _, v := range this.wires {
 		if fn(v) {
@@ -1836,8 +1836,8 @@ func (this *Wires) Find(fn func(w *Wire) bool) *Wire {
 }
 
 func (this *Wires) Kill(conn net.Conn) {
-	this.mu.Lock()
-	defer this.mu.Unlock()
+	this.Lock()
+	defer this.Unlock()
 
 	var w *Wire
 	this.wires, w = remove(conn, this.wires)
@@ -1887,8 +1887,8 @@ func removeWire(wires []*Wire, k int) []*Wire {
 }
 
 func (this *Wires) GetAll() []*Wire {
-	this.mu.Lock()
-	defer this.mu.Unlock()
+	this.Lock()
+	defer this.Unlock()
 
 	return clone(this.wires)
 }
@@ -1902,8 +1902,8 @@ func clone(wires []*Wire) []*Wire {
 }
 
 func (this *Wires) Size() int {
-	this.mu.RLock()
-	defer this.mu.RUnlock()
+	this.RLock()
+	defer this.RUnlock()
 	return len(this.wires)
 }
 
@@ -1982,7 +1982,9 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 	err = UnknownTopic(faults.New(UNKNOWNTOPIC, msg.name))
 	if msg.kind == PUSH || msg.kind == REQ {
 		go func() {
+			this.RLock()
 			var wires = wiresTriage(name, this.wires, skipWire)
+			this.RUnlock()
 			var size = len(wires)
 			for i := 0; i < size; i++ {
 				var w = this.loadBalancer.Next(name, wires)

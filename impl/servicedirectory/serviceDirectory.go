@@ -298,8 +298,10 @@ func NewPeer(name string) *Peer {
 	node.local = gomsg.NewServer()
 	// consecutive calls under 500 ms to "DIR/*"
 	// will be consumed by the same directory node
-	node.dirs.Stick("DIR/*", time.Millisecond*500)
-	node.AddSendListener(0, func(event gomsg.SendEvent) {
+	var lb = gomsg.NewSimpleLB()
+	lb.Stick("DIR/*", time.Millisecond*500)
+	node.SetLoadBalancer(lb)
+	node.AddSendListener(func(event gomsg.SendEvent) {
 		node.lazyConnect(event.Name)
 	})
 	node.SetCodec(gomsg.JsonCodec{})

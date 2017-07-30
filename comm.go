@@ -342,12 +342,13 @@ type Wire struct {
 	disconnected func(net.Conn, error)
 	findHandlers func(name string) []func(ctx *Request)
 
-	mutop           sync.RWMutex
-	remoteGroupID   string // it is used for High Availability
-	localGroupID    string // it is used for High Availability
-	remoteTopics    map[string]bool
-	onSendListeners map[uint64]SendListener
-	sendListenerIdx uint64
+	mutop         sync.RWMutex
+	remoteGroupID string // it is used for High Availability
+	localGroupID  string // it is used for High Availability
+	remoteTopics  map[string]bool
+	OnSend        func(SendEvent)
+	OnNewTopic    func(string)
+	OnDropTopic   func(string)
 
 	// load can be anything defined by the loadbalancer
 	load interface{}
@@ -358,13 +359,12 @@ type Wire struct {
 
 func NewWire(codec Codec) *Wire {
 	wire := &Wire{
-		uuid:            NewUUID(),
-		callbacks:       make(map[uint32]chan *Response),
-		timeout:         time.Second * 20,
-		codec:           codec,
-		remoteTopics:    make(map[string]bool),
-		onSendListeners: make(map[uint64]SendListener),
-		bufferSize:      1000,
+		uuid:         NewUUID(),
+		callbacks:    make(map[uint32]chan *Response),
+		timeout:      time.Second * 20,
+		codec:        codec,
+		remoteTopics: make(map[string]bool),
+		bufferSize:   1000,
 	}
 
 	return wire
@@ -381,26 +381,6 @@ func (this *Wire) SetRateLimiter(limiter toolkit.Rate) {
 // Conn gets the connection
 func (this *Wire) Conn() net.Conn {
 	return this.conn
-}
-
-// AddSendListener adds a listener on send messages (Publis/Push/RequestAll/Request)
-func (this *Wire) AddSendListener(idx uint64, listener SendListener) uint64 {
-	if idx == 0 {
-		idx = atomic.AddUint64(&this.sendListenerIdx, 1)
-	}
-	this.onSendListeners[idx] = listener
-	return idx
-}
-
-// RemoveSendListener removes a previously added listener on send messages
-func (this *Wire) RemoveSendListener(idx uint64) {
-	delete(this.onSendListeners, idx)
-}
-
-func (this *Wire) fireSendListener(event SendEvent) {
-	for _, listener := range this.onSendListeners {
-		listener(event)
-	}
 }
 
 func (this *Wire) SetConn(c net.Conn) {
@@ -431,21 +411,28 @@ func (this *Wire) stop() {
 
 func (this *Wire) Destroy() {
 	this.stop()
-	this.onSendListeners = make(map[uint64]SendListener)
-	atomic.StoreUint64(&this.sendListenerIdx, 0)
+	this.OnNewTopic = nil
+	this.OnDropTopic = nil
 }
 
 func (this *Wire) addRemoteTopic(name string) {
 	this.mutop.Lock()
-	defer this.mutop.Unlock()
-
+	var exists = this.remoteTopics[name]
 	this.remoteTopics[name] = true
+	this.mutop.Unlock()
+
+	if !exists && this.OnNewTopic != nil {
+		this.OnNewTopic(name)
+	}
 }
 
 func (this *Wire) deleteRemoteTopic(name string) {
 	this.mutop.Lock()
-	defer this.mutop.Unlock()
 	delete(this.remoteTopics, name)
+	this.mutop.Unlock()
+	if this.OnDropTopic != nil {
+		this.OnDropTopic(name)
+	}
 }
 
 func (this *Wire) hasRemoteTopic(name string) bool {
@@ -539,6 +526,15 @@ func (this *Wire) Send(msg Envelope) <-chan error {
 		return msg.errch
 	}
 
+	if this.OnSend != nil {
+		this.OnSend(SendEvent{
+			Kind:    msg.kind,
+			Name:    msg.name,
+			Payload: msg.payload,
+			Handler: msg.handler,
+		})
+	}
+
 	return this.justsend(msg)
 }
 
@@ -546,14 +542,6 @@ func (this *Wire) justsend(msg Envelope) <-chan error {
 	if msg.errch == nil {
 		msg.errch = make(chan error, 1)
 	}
-
-	// fires all registered listeners
-	this.fireSendListener(SendEvent{
-		Kind:    msg.kind,
-		Name:    msg.name,
-		Payload: msg.payload,
-		Handler: msg.handler,
-	})
 
 	// SUB, UNSUB
 	msg.sequence = atomic.AddUint32(&this.sequence, 1)
@@ -1158,6 +1146,10 @@ type Client struct {
 	wire                 *Wire
 	reconnectInterval    time.Duration
 	reconnectMaxInterval time.Duration
+	sendListeners        map[uint64]SendListener
+	newTopicListeners    map[uint64]func(string)
+	dropTopicListeners   map[uint64]func(string)
+	listenersIdx         uint64
 }
 
 // NewClient creates a Client
@@ -1166,6 +1158,9 @@ func NewClient() *Client {
 		reconnectInterval:    time.Millisecond * 10,
 		reconnectMaxInterval: time.Second,
 		wire:                 NewWire(JsonCodec{}),
+		sendListeners:        make(map[uint64]SendListener),
+		newTopicListeners:    make(map[uint64]func(string)),
+		dropTopicListeners:   make(map[uint64]func(string)),
 	}
 	this.timeout = time.Second * 10
 	this.handlers = make([]handler, 0)
@@ -1193,10 +1188,76 @@ func NewClient() *Client {
 				go this.dial(this.reconnectInterval, make(chan error, 1))
 			}
 		}
-
 	}
 
 	return this
+}
+
+// AddSendListener adds a listener on send messages (Publis/Push/RequestAll/Request)
+func (this *Client) AddSendListener(listener SendListener) uint64 {
+	if this.wire.OnSend == nil {
+		this.wire.OnSend = func(event SendEvent) {
+			this.fireSendListeners(event)
+		}
+	}
+	var idx = atomic.AddUint64(&this.listenersIdx, 1)
+	this.sendListeners[idx] = listener
+	return idx
+}
+
+// RemoveSendListener removes a previously added listener on send messages
+func (this *Client) RemoveSendListener(idx uint64) {
+	delete(this.sendListeners, idx)
+}
+
+func (this *Client) fireSendListeners(event SendEvent) {
+	for _, listener := range this.sendListeners {
+		listener(event)
+	}
+}
+
+func (this *Client) AddNewTopicListener(listener func(string)) uint64 {
+	if this.wire.OnNewTopic == nil {
+		this.wire.OnNewTopic = func(topic string) {
+			this.fireNewTopicListeners(topic)
+		}
+	}
+	var idx = atomic.AddUint64(&this.listenersIdx, 1)
+	this.newTopicListeners[idx] = listener
+	return idx
+}
+
+// RemoveSendListener removes a previously added listener on send messages
+func (this *Client) RemoveNewTopicListener(idx uint64) {
+	delete(this.newTopicListeners, idx)
+}
+
+func (this *Client) fireNewTopicListeners(topic string) {
+	for _, listener := range this.newTopicListeners {
+		listener(topic)
+	}
+}
+
+func (this *Client) AddDropTopicListener(listener func(string)) uint64 {
+	if this.wire.OnDropTopic == nil {
+		this.wire.OnDropTopic = func(topic string) {
+			this.fireDropTopicListener(topic)
+		}
+	}
+	var idx = atomic.AddUint64(&this.listenersIdx, 1)
+	this.dropTopicListeners[idx] = listener
+	return idx
+}
+
+// RemoveSendListener removes a previously added listener on send messages
+func (this *Client) RemoveDropTopicListener(idx uint64) {
+	delete(this.dropTopicListeners, idx)
+}
+
+func (this *Client) fireDropTopicListener(topic string) {
+	for _, listener := range this.dropTopicListeners {
+		listener(topic)
+	}
 }
 
 func (this *Client) SetBufferSize(size int) {
@@ -1253,6 +1314,9 @@ func (this *Client) handshake(c net.Conn) error {
 	}
 	this.wire.mutop.Lock()
 	this.wire.remoteTopics = remoteTopics
+	for k := range remoteTopics {
+		this.fireNewTopicListeners(k)
+	}
 	this.wire.remoteGroupID = group
 	this.wire.mutop.Unlock()
 
@@ -1367,6 +1431,10 @@ func (this *Client) Disconnect() {
 func (this *Client) Destroy() {
 	this.reconnectInterval = 0
 	this.wire.Destroy()
+	this.sendListeners = make(map[uint64]SendListener)
+	this.newTopicListeners = make(map[uint64]func(string))
+	this.dropTopicListeners = make(map[uint64]func(string))
+	atomic.StoreUint64(&this.listenersIdx, 0)
 	this.Disconnect()
 }
 
@@ -1524,8 +1592,10 @@ type Wires struct {
 	groups             map[string][]*Wire
 	cursor             int
 	codec              Codec
-	onSendListeners    map[uint64]SendListener
-	sendListenerIdx    uint64
+	sendListeners      map[uint64]SendListener
+	newTopicListeners  map[uint64]func(string)
+	dropTopicListeners map[uint64]func(string)
+	listenersIdx       uint64
 	loadBalancer       LoadBalancer
 	rateLimiterFactory func() toolkit.Rate
 	bufferSize         int
@@ -1540,35 +1610,87 @@ type SendEvent struct {
 	Handler interface{}
 }
 
-// AddSendListener adds a listener on send messages (Publis/Push/RequestAll/Request)
-func (this *Wires) AddSendListener(idx uint64, listener SendListener) uint64 {
-	if idx == 0 {
-		idx = atomic.AddUint64(&this.sendListenerIdx, 1)
+// NewWires creates a Wires structure
+func NewWires(codec Codec) *Wires {
+	return &Wires{
+		wires:              make([]*Wire, 0),
+		groups:             make(map[string][]*Wire),
+		codec:              codec,
+		sendListeners:      make(map[uint64]SendListener),
+		newTopicListeners:  make(map[uint64]func(string)),
+		dropTopicListeners: make(map[uint64]func(string)),
+		loadBalancer:       NewSimpleLB(),
+		bufferSize:         1000,
 	}
-	this.onSendListeners[idx] = listener
+}
+
+// AddSendListener adds a listener on send messages (Publis/Push/RequestAll/Request)
+func (this *Wires) AddSendListener(listener SendListener) uint64 {
+	var idx = atomic.AddUint64(&this.listenersIdx, 1)
+	this.sendListeners[idx] = listener
 	return idx
 }
 
 // RemoveSendListener removes a previously added listener on send messages
 func (this *Wires) RemoveSendListener(idx uint64) {
-	delete(this.onSendListeners, idx)
+	delete(this.sendListeners, idx)
 }
 
 func (this *Wires) fireSendListener(event SendEvent) {
-	for _, listener := range this.onSendListeners {
+	for _, listener := range this.sendListeners {
 		listener(event)
 	}
 }
 
-// NewWires creates a Wires structure
-func NewWires(codec Codec) *Wires {
-	return &Wires{
-		wires:           make([]*Wire, 0),
-		groups:          make(map[string][]*Wire),
-		codec:           codec,
-		onSendListeners: make(map[uint64]SendListener),
-		loadBalancer:    NewSimpleLB(),
-		bufferSize:      1000,
+func (this *Wires) AddNewTopicListener(listener func(string)) uint64 {
+	this.mu.Lock()
+	defer this.mu.Unlock()
+
+	var idx = atomic.AddUint64(&this.listenersIdx, 1)
+	this.newTopicListeners[idx] = listener
+	return idx
+}
+
+// RemoveSendListener removes a previously added listener on send messages
+func (this *Wires) RemoveNewTopicListener(idx uint64) {
+	this.mu.Lock()
+	defer this.mu.Unlock()
+
+	delete(this.newTopicListeners, idx)
+}
+
+func (this *Wires) fireNewTopicListener(topic string) {
+	this.mu.RLock()
+	defer this.mu.RUnlock()
+
+	for _, listener := range this.newTopicListeners {
+		listener(topic)
+	}
+}
+
+func (this *Wires) AddDropTopicListener(listener func(string)) uint64 {
+	this.mu.Lock()
+	defer this.mu.Unlock()
+
+	var idx = atomic.AddUint64(&this.listenersIdx, 1)
+	this.dropTopicListeners[idx] = listener
+	return idx
+}
+
+// RemoveSendListener removes a previously added listener on send messages
+func (this *Wires) RemoveDropTopicListener(idx uint64) {
+	this.mu.Lock()
+	defer this.mu.Unlock()
+
+	delete(this.dropTopicListeners, idx)
+}
+
+func (this *Wires) fireDropTopicListener(topic string) {
+	this.mu.RLock()
+	defer this.mu.RUnlock()
+
+	for _, listener := range this.dropTopicListeners {
+		listener(topic)
 	}
 }
 
@@ -1614,8 +1736,10 @@ func (this *Wires) Destroy() {
 	}
 	this.wires = make([]*Wire, 0)
 	this.groups = make(map[string][]*Wire)
-	this.onSendListeners = make(map[uint64]SendListener)
-	atomic.StoreUint64(&this.sendListenerIdx, 0)
+	this.sendListeners = make(map[uint64]SendListener)
+	this.newTopicListeners = make(map[uint64]func(string))
+	this.dropTopicListeners = make(map[uint64]func(string))
+	atomic.StoreUint64(&this.listenersIdx, 0)
 	this.cursor = 0
 }
 
@@ -1635,6 +1759,23 @@ func (this *Wires) Add(wire *Wire) {
 	if this.rateLimiterFactory != nil {
 		wire.rateLimiter = this.rateLimiterFactory()
 	}
+
+	// define trigger on new topic
+	wire.OnNewTopic = func(name string) {
+		for _, w := range this.wires {
+			// if already exists ignore
+			if w.hasRemoteTopic(name) {
+				return
+			}
+		}
+		this.fireNewTopicListener(name)
+	}
+
+	for k := range wire.remoteTopics {
+		// use trigger
+		wire.OnNewTopic(k)
+	}
+
 	this.wires = append(this.wires, wire)
 	this.loadBalancer.Add(wire)
 
@@ -1669,6 +1810,23 @@ func (this *Wires) Kill(conn net.Conn) {
 
 	var w *Wire
 	this.wires, w = remove(conn, this.wires)
+
+	// define trigger on drop topic
+	w.OnDropTopic = func(topic string) {
+		for _, w := range this.wires {
+			// if still exists ignore
+			if w.hasRemoteTopic(topic) {
+				return
+			}
+		}
+		this.fireDropTopicListener(topic)
+	}
+
+	for k := range w.remoteTopics {
+		// use trigger
+		w.OnDropTopic(k)
+	}
+
 	if w != nil {
 		this.loadBalancer.Remove(w)
 
@@ -1758,6 +1916,15 @@ func (this *Wires) Send(kind EKind, name string, payload interface{}, handler in
 func (this *Wires) send(w *Wire, msg Envelope) <-chan error {
 	this.loadBalancer.BeforeSend(w, msg)
 	defer this.loadBalancer.AfterSend(w, msg)
+
+	// fires all registered listeners
+	this.fireSendListener(SendEvent{
+		Kind:    msg.kind,
+		Name:    msg.name,
+		Payload: msg.payload,
+		Handler: msg.handler,
+	})
+
 	return w.justsend(msg)
 }
 
@@ -1780,14 +1947,6 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 		errch <- err
 		return errch
 	}
-
-	// fires all registered listeners
-	this.fireSendListener(SendEvent{
-		Kind:    kind,
-		Name:    name,
-		Payload: payload,
-		Handler: handler,
-	})
 
 	err = UnknownTopic(faults.New(UNKNOWNTOPIC, msg.name))
 	if msg.kind == PUSH || msg.kind == REQ {

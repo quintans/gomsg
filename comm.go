@@ -434,20 +434,19 @@ func (this *Wire) Destroy() {
 }
 
 func (this *Wire) addRemoteTopic(name string) {
-	this.mutop.Lock()
-	var exists = this.remoteTopics[name]
-	this.remoteTopics[name] = true
-	this.mutop.Unlock()
-
-	if !exists && this.OnNewTopic != nil {
+	if this.OnNewTopic != nil {
 		this.OnNewTopic(name)
 	}
+	this.mutop.Lock()
+	defer this.mutop.Unlock()
+	this.remoteTopics[name] = true
 }
 
 func (this *Wire) deleteRemoteTopic(name string) {
 	this.mutop.Lock()
 	delete(this.remoteTopics, name)
 	this.mutop.Unlock()
+
 	if this.OnDropTopic != nil {
 		this.OnDropTopic(name)
 	}

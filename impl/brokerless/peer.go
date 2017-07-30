@@ -56,6 +56,7 @@ type Config struct {
 
 type Peer struct {
 	sync.RWMutex
+	*gomsg.Server
 
 	cfg            Config
 	tcpAddr        string
@@ -63,7 +64,6 @@ type Peer struct {
 	// peers ones will be used to listen
 	peers map[string]*node
 	// the server will be used to send
-	server       *gomsg.Server
 	udpConn      *net.UDPConn
 	handlers     map[string][]interface{}
 	beaconTicker *toolkit.Ticker
@@ -94,6 +94,7 @@ func NewPeer(cfg Config) *Peer {
 	}
 
 	peer := &Peer{
+		Server:         gomsg.NewServer(),
 		cfg:            cfg,
 		peers:          make(map[string]*node),
 		handlers:       make(map[string][]interface{}),
@@ -109,21 +110,18 @@ func (peer *Peer) SetRequestTimeout(timeout time.Duration) {
 
 func (peer *Peer) Connect(tcpAddr string) {
 	logger.Infof("Binding peer %X at %s", peer.cfg.Uuid, tcpAddr)
-	peer.server = gomsg.NewServer()
-
 	// special case where we receive a targeted request
 	// when a peer tries to check if I exist
 	// because it did not received the beacon in time
-	peer.server.Handle(PING, func() {})
+	peer.Server.Handle(PING, func() {})
 
 	peer.tcpAddr = tcpAddr
 	peer.serveUDP(peer.cfg.BeaconAddr, peer.beaconHandler)
-	peer.server.OnBind = func(l net.Listener) {
-		fmt.Println("==========> Binded")
+	peer.Server.OnBind = func(l net.Listener) {
 		peer.startBeacon(peer.cfg.BeaconAddr)
 	}
 
-	peer.server.Listen(tcpAddr)
+	peer.Server.Listen(tcpAddr)
 }
 
 func (peer *Peer) checkPeer(uuid string, addr string) {
@@ -243,7 +241,7 @@ func (peer *Peer) beaconHandler(src *net.UDPAddr, n int, b []byte) {
 }
 
 func (peer *Peer) Destroy() {
-	peer.server.Destroy()
+	peer.Server.Destroy()
 	var conn = peer.udpConn
 	peer.udpConn = nil
 	if conn != nil {
@@ -272,7 +270,7 @@ func (peer *Peer) startBeacon(a string) error {
 		return nil
 	}
 	var buf16 = make([]byte, 2)
-	var port = uint16(peer.server.BindPort())
+	var port = uint16(peer.Server.BindPort())
 	binary.LittleEndian.PutUint16(buf16, port)
 
 	var buf bytes.Buffer
@@ -338,18 +336,10 @@ func (peer *Peer) Cancel(name string) {
 	}
 }
 
-func (peer *Peer) Publish(name string, payload interface{}) <-chan error {
-	return peer.server.Publish(name, payload)
-}
-
-func (peer *Peer) Push(name string, payload interface{}) <-chan error {
-	return peer.server.Push(name, payload)
-}
-
 func (peer *Peer) Request(name string, payload interface{}, handler interface{}) <-chan error {
-	return peer.server.RequestTimeout(name, payload, handler, peer.requestTimeout)
+	return peer.Server.RequestTimeout(name, payload, handler, peer.requestTimeout)
 }
 
 func (peer *Peer) RequestAll(name string, payload interface{}, handler interface{}) <-chan error {
-	return peer.server.RequestAll(name, payload, handler, peer.requestTimeout)
+	return peer.Server.RequestAll(name, payload, handler, peer.requestTimeout)
 }

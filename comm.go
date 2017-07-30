@@ -188,6 +188,8 @@ func (this Response) EndMark() bool {
 	return this.Kind == ACK
 }
 
+type Middleware func(*Request)
+
 type Request struct {
 	Response
 
@@ -199,6 +201,9 @@ type Request struct {
 	// type gomsg.Request the reply will not be sent until we call gomsg.Request.ReplyAs().
 	// This is used to route messages (gomsg.Route) from server to server
 	deferReply bool
+
+	middleware    []Middleware
+	middlewarePos int
 }
 
 //var _ IRequest = &Request{}
@@ -218,6 +223,15 @@ func NewRequest(wire *Wire, c net.Conn, msg Envelope) *Request {
 	}
 
 	return ctx
+}
+
+// Next calls the next handler
+func (this *Request) Next() {
+	if this.middlewarePos < len(this.middleware)-1 {
+		this.middlewarePos++
+		this.middleware[this.middlewarePos](this)
+		this.middlewarePos--
+	}
 }
 
 func (this *Request) reset() {
@@ -267,6 +281,10 @@ func (this *Request) DeferReply() {
 func (this *Request) Terminate() {
 	this.reset()
 	this.terminate = true
+}
+
+func (this *Request) Terminated() bool {
+	return this.terminate
 }
 
 // sets a multi reply (REQ_PARTIAL)
@@ -340,7 +358,7 @@ type Wire struct {
 	callbacks map[uint32]chan *Response
 
 	disconnected func(net.Conn, error)
-	findHandlers func(name string) []func(ctx *Request)
+	findHandlers func(name string) []handler
 
 	mutop         sync.RWMutex
 	remoteGroupID string // it is used for High Availability
@@ -797,7 +815,9 @@ func (this *Wire) runHandler() {
 			if len(handlers) > 0 {
 				var req = NewRequest(this, c, msg)
 				for _, hnd := range handlers {
-					hnd(req)
+					req.middleware = hnd.calls
+					req.middlewarePos = 0
+					hnd.calls[0](req)
 					// if there is any handler that terminates,
 					// there will be no reply
 					if req.terminate {
@@ -855,7 +875,9 @@ func (this *Wire) runHandler() {
 			if len(handlers) > 0 {
 				var req = NewRequest(this, c, msg)
 				for _, handler := range handlers {
-					handler(req)
+					req.middleware = handler.calls
+					req.middlewarePos = 0
+					handler.calls[0](req)
 				}
 			}
 		}
@@ -963,7 +985,7 @@ func CreateRequestHandler(codec Codec, fun interface{}) func(*Request) {
 	// validate argument types
 	size := typ.NumIn()
 	if size > 2 {
-		panic("Invalid function. Function can only have at the most two  parameters.")
+		panic("Invalid function. Function can only have at most two parameters.")
 	} else if size > 1 {
 		t := typ.In(0)
 		if t != requestType {
@@ -1055,8 +1077,8 @@ func CreateRequestHandler(codec Codec, fun interface{}) func(*Request) {
 }
 
 type handler struct {
-	rule string
-	call func(*Request)
+	rule  string
+	calls []Middleware
 }
 
 type ClientServer struct {
@@ -1067,6 +1089,13 @@ type ClientServer struct {
 	muconn    sync.RWMutex
 	OnConnect func(w *Wire)
 	OnClose   func(c net.Conn)
+}
+
+func NewClientServer() ClientServer {
+	return ClientServer{
+		timeout:  time.Second * 10,
+		handlers: make([]handler, 0),
+	}
 }
 
 func (this *ClientServer) removeHandler(name string) {
@@ -1086,18 +1115,18 @@ func (this *ClientServer) removeHandler(name string) {
 	this.muhnd.Unlock()
 }
 
-func (this *ClientServer) addHandler(name string, hnd func(*Request)) {
+func (this *ClientServer) addHandler(name string, hnds []Middleware) {
 	this.muhnd.Lock()
 	defer this.muhnd.Unlock()
 
 	for k, v := range this.handlers {
 		if v.rule == name {
-			this.handlers[k].call = hnd
+			this.handlers[k].calls = hnds
 			return
 		}
 	}
 
-	this.handlers = append(this.handlers, handler{name, hnd})
+	this.handlers = append(this.handlers, handler{name, hnds})
 
 }
 
@@ -1162,10 +1191,9 @@ func NewClient() *Client {
 		newTopicListeners:    make(map[uint64]func(string)),
 		dropTopicListeners:   make(map[uint64]func(string)),
 	}
-	this.timeout = time.Second * 10
-	this.handlers = make([]handler, 0)
+	this.ClientServer = NewClientServer()
 
-	this.wire.findHandlers = func(name string) []func(ctx *Request) {
+	this.wire.findHandlers = func(name string) []handler {
 		this.muhnd.RLock()
 		defer this.muhnd.RUnlock()
 
@@ -1502,9 +1530,13 @@ func (this *Client) Conn() net.Conn {
 // When handling publish/push messages, any return from the function handler is discarded.
 // When handling Request/RequestAll messages, if a return is not specified,
 // the caller will not receive a reply until you explicitly call gomsg.Request.ReplyAs()
-func (this *Client) Handle(name string, fun interface{}) {
-	var hnd = CreateRequestHandler(this.wire.codec, fun)
-	this.addHandler(name, hnd)
+func (this *Client) Handle(name string, middlewares ...interface{}) {
+	var size = len(middlewares)
+	var hnds = make([]Middleware, size)
+	for i := 0; i < size; i++ {
+		hnds[i] = CreateRequestHandler(this.wire.codec, middlewares[i])
+	}
+	this.addHandler(name, hnds)
 
 	this.muconn.Lock()
 	defer this.muconn.Unlock()
@@ -2091,8 +2123,7 @@ type Server struct {
 func NewServer() *Server {
 	server := new(Server)
 	server.Wires = NewWires(JsonCodec{})
-	server.timeout = time.Second * 10
-	server.handlers = make([]handler, 0)
+	server.ClientServer = NewClientServer()
 	return server
 }
 
@@ -2217,7 +2248,7 @@ func (this *Server) handshake(c net.Conn, wire *Wire) (string, map[string]bool, 
 	return group, payload, nil
 }
 
-func (this *Server) findHandlers(name string) []func(c *Request) {
+func (this *Server) findHandlers(name string) []handler {
 	this.muhnd.RLock()
 	defer this.muhnd.RUnlock()
 
@@ -2225,17 +2256,17 @@ func (this *Server) findHandlers(name string) []func(c *Request) {
 }
 
 // find the first match
-func findHandlers(name string, handler []handler) []func(c *Request) {
-	var funcs = make([]func(c *Request), 0)
+func findHandlers(name string, handlers []handler) []handler {
+	var funcs = make([]handler, 0)
 	var prefix string
-	for _, v := range handler {
+	for _, v := range handlers {
 		if strings.HasSuffix(v.rule, FILTER_TOKEN) {
 			prefix = v.rule[:len(v.rule)-1]
 			if strings.HasPrefix(name, prefix) {
-				funcs = append(funcs, v.call)
+				funcs = append(funcs, v)
 			}
 		} else if name == v.rule {
-			funcs = append(funcs, v.call)
+			funcs = append(funcs, v)
 		}
 	}
 	return funcs
@@ -2257,10 +2288,13 @@ func (this *Server) Destroy() {
 // When handling publish/push messages, any return from the function handler is discarded.
 // When handling Request/RequestAll messages, if a return is not specified,
 // the caller will not receive a reply until you explicitly call gomsg.Request.ReplyAs()
-func (this *Server) Handle(name string, fun interface{}) {
-	hnd := CreateRequestHandler(this.codec, fun)
-
-	this.addHandler(name, hnd)
+func (this *Server) Handle(name string, middlewares ...interface{}) {
+	var size = len(middlewares)
+	var hnds = make([]Middleware, size)
+	for i := 0; i < size; i++ {
+		hnds[i] = CreateRequestHandler(this.codec, middlewares[i])
+	}
+	this.addHandler(name, hnds)
 
 	msg, _ := createEnvelope(SUB, name, nil, nil, this.timeout, this.codec)
 	var ws = this.Wires.GetAll()
@@ -2321,7 +2355,7 @@ func test(t EKind, values ...EKind) bool {
 }
 
 type Handler interface {
-	Handle(name string, fun interface{})
+	Handle(string, ...interface{})
 }
 
 type Sender interface {

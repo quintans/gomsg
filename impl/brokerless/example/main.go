@@ -25,9 +25,17 @@ const (
 var codec = gomsg.JsonCodec{}
 
 func main() {
+	var mw = func(r *gomsg.Request) {
+		fmt.Println("##### Calling endpoint #####", r.Name)
+		defer fmt.Println("##### Called endpoint #####", r.Name)
+		r.Next()
+	}
+
+	var greet = 0
 	var cfg = brokerless.Config{Uuid: gomsg.NewUUID()}
 	var cli1 = brokerless.NewPeer(cfg)
 	cli1.Handle(SERVICE_GREETING, func(greeting string) string {
+		greet++
 		return "#1: hi " + greeting
 	})
 	cli1.Connect(":7001")
@@ -45,12 +53,13 @@ func main() {
 	var uuid3 = gomsg.NewUUID()
 	var cfg3 = brokerless.Config{Uuid: uuid3}
 	var cli3 = brokerless.NewPeer(cfg3)
-	// the same as cli2
-	cli3.Handle(SERVICE_GREETING, func(r *gomsg.Request) {
+	cli3.Handle(SERVICE_GREETING, mw, func(r *gomsg.Request) {
+		fmt.Println(">>>>> Calling SERVICE_GREETING #3 <<<<<")
+		greet++
 		var greeting string
 		codec.Decode(r.Payload(), &greeting)
-		//return "hi from #3"
-		// in json format because is going to be decoded
+		// return "hi from #3"
+		// direct in json format because I am lazy (it will be decoded)
 		r.SetReply([]byte("\"#3: hi " + greeting + "\""))
 	})
 	cli3.Connect(":7003")
@@ -58,17 +67,21 @@ func main() {
 
 	time.Sleep(time.Second * 2)
 
-	var cnt = 0
+	var replies = 0
 	<-cli1.RequestAll(SERVICE_GREETING, "#1", func(reply string) {
-		cnt++
+		replies++
 		var str = reply
 		if reply == "" {
 			str = "[END]"
 		}
 		fmt.Println("=====>", str)
 	})
-	if cnt != 2 {
-		fmt.Println("ERROR =====> expected 2, got", cnt)
+	if replies != 2 {
+		fmt.Println("ERROR =====> expected 2 replies, got", replies)
+		os.Exit(1)
+	}
+	if greet != 1 {
+		fmt.Println("ERROR =====> expected 1 greet, got", greet)
 		os.Exit(1)
 	}
 

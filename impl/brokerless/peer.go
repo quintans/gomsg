@@ -65,7 +65,7 @@ type Peer struct {
 	// the server will be used to send
 	server       *gomsg.Server
 	udpConn      *net.UDPConn
-	handlers     map[string]interface{}
+	handlers     map[string][]interface{}
 	beaconTicker *toolkit.Ticker
 }
 
@@ -96,7 +96,7 @@ func NewPeer(cfg Config) *Peer {
 	peer := &Peer{
 		cfg:            cfg,
 		peers:          make(map[string]*node),
-		handlers:       make(map[string]interface{}),
+		handlers:       make(map[string][]interface{}),
 		requestTimeout: time.Second,
 	}
 
@@ -186,7 +186,7 @@ func (peer *Peer) connectPeer(uuid string, addr string) error {
 
 	// apply all handlers
 	for k, v := range peer.handlers {
-		cli.Handle(k, v)
+		cli.Handle(k, v...)
 	}
 	return nil
 }
@@ -319,7 +319,7 @@ func (peer *Peer) serveUDP(a string, hnd func(*net.UDPAddr, int, []byte)) error 
 	return nil
 }
 
-func (peer *Peer) Handle(name string, hnd interface{}) {
+func (peer *Peer) Handle(name string, hnd ...interface{}) {
 	peer.Lock()
 	defer peer.Unlock()
 

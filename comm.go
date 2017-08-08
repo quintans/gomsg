@@ -482,7 +482,7 @@ func (this *Wire) asynchWaitForCallback(msg Envelope) chan *Response {
 	defer this.mucb.Unlock()
 
 	// frame channel
-	ch := make(chan *Response, 1)
+	ch := make(chan *Response, 10)
 	this.callbacks[msg.sequence] = ch
 	// error channel
 	go func() {

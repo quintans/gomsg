@@ -2,12 +2,13 @@ package main
 
 import (
 	"fmt"
+	"testing"
 	"time"
 
 	"github.com/quintans/gomsg"
 )
 
-func main() {
+func TestLateServer(t *testing.T) {
 	cli := gomsg.NewClient()
 	cli.Connect("localhost:7777")
 	time.Sleep(time.Millisecond * 100)
@@ -37,10 +38,8 @@ func main() {
 	*/
 	time.Sleep(time.Second)
 
-	if result == "teste" {
-		fmt.Println("*** OK ***")
-	} else {
-		fmt.Println("### FAIL ###")
+	if result != "teste" {
+		t.Fatal("Expected 'teste', got", result)
 	}
 
 }

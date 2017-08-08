@@ -103,9 +103,10 @@ var (
 
 // errors
 var (
-	NOCODEC   = errors.New("No codec defined")
-	EOR       = errors.New("End Of Multiple Reply")
-	NACKERROR = errors.New("Not Acknowledge Error")
+	NOCODEC    = errors.New("No codec defined")
+	EOR        = errors.New("End Of Multiple Reply")
+	NACKERROR  = errors.New("Not Acknowledge Error")
+	CLOSEDWIRE = errors.New("Closed Wire")
 
 	UNKNOWNTOPIC = "No registered subscriber for %s."
 	TIMEOUT      = "Timeout (%s) while waiting for reply of call #%d %s(%s)=%s"
@@ -346,7 +347,6 @@ type EnvelopeConn struct {
 
 type Wire struct {
 	conn      net.Conn
-	uuid      []byte
 	chin      chan Envelope
 	handlerch chan EnvelopeConn
 
@@ -363,10 +363,11 @@ type Wire struct {
 	mutop         sync.RWMutex
 	remoteGroupID string // it is used for High Availability
 	localGroupID  string // it is used for High Availability
+	remoteUuid    []byte
 	remoteTopics  map[string]bool
-	OnSend        func(SendEvent)
-	OnNewTopic    func(string)
-	OnDropTopic   func(string)
+	OnSend        SendListener
+	OnNewTopic    TopicListener
+	OnDropTopic   TopicListener
 
 	// load can be anything defined by the loadbalancer
 	load interface{}
@@ -377,7 +378,6 @@ type Wire struct {
 
 func NewWire(codec Codec) *Wire {
 	wire := &Wire{
-		uuid:         NewUUID(),
 		callbacks:    make(map[uint32]chan *Response),
 		timeout:      time.Second * 20,
 		codec:        codec,
@@ -410,9 +410,9 @@ func (this *Wire) SetConn(c net.Conn) {
 		this.conn = c
 		this.chin = make(chan Envelope, this.bufferSize)
 		this.handlerch = make(chan EnvelopeConn, this.bufferSize)
-		go this.writer(c)
+		go this.writer(c, this.chin)
 		go this.reader(c)
-		go this.runHandler()
+		go this.runHandler(this.handlerch)
 	}
 }
 
@@ -422,11 +422,17 @@ func (this *Wire) stop() {
 	}
 	this.conn = nil
 	if this.chin != nil {
+		this.mucb.Lock()
+		defer this.mucb.Unlock()
+
 		close(this.chin)
 		close(this.handlerch)
 
 		this.chin = nil
 		this.handlerch = nil
+
+		this.callbacks = make(map[uint32]chan *Response)
+		this.remoteTopics = make(map[string]bool)
 	}
 }
 
@@ -438,7 +444,7 @@ func (this *Wire) Destroy() {
 
 func (this *Wire) addRemoteTopic(name string) {
 	if this.OnNewTopic != nil {
-		this.OnNewTopic(name)
+		this.OnNewTopic(TopicEvent{this.remoteUuid, this.conn.RemoteAddr().String(), name})
 	}
 	this.mutop.Lock()
 	defer this.mutop.Unlock()
@@ -451,7 +457,7 @@ func (this *Wire) deleteRemoteTopic(name string) {
 	this.mutop.Unlock()
 
 	if this.OnDropTopic != nil {
-		this.OnDropTopic(name)
+		this.OnDropTopic(TopicEvent{this.remoteUuid, this.conn.RemoteAddr().String(), name})
 	}
 }
 
@@ -485,6 +491,7 @@ func (this *Wire) asynchWaitForCallback(msg Envelope) chan *Response {
 			case <-time.After(msg.timeout):
 				this.delCallback(msg.sequence)
 				msg.errch <- TimeoutError(faults.New(TIMEOUT, msg.timeout, msg.sequence, msg.kind, msg.name, msg.payload))
+				logger.Infof("Timeout for: %s", msg)
 				return
 
 			case r := <-ch:
@@ -577,7 +584,13 @@ func (this *Wire) enqueue(msg Envelope) {
 	}
 	this.mucb.Lock()
 	defer this.mucb.Unlock()
-	this.chin <- msg
+
+	if this.chin != nil {
+		this.chin <- msg
+	} else {
+		logger.Errorf("Closed connection. Unable to send %s", msg)
+		msg.errch <- CLOSEDWIRE
+	}
 }
 
 func (this *Wire) reply(kind EKind, seq uint32, payload []byte) {
@@ -608,8 +621,9 @@ func (this *Wire) NewReplyEnvelope(kind EKind, seq uint32, payload []byte) Envel
 	}
 }
 
-func (this *Wire) writer(c net.Conn) {
-	for msg := range this.chin {
+func (this *Wire) writer(c net.Conn, chin chan Envelope) {
+	for msg := range chin {
+		logger.Debugf("Writing %s to %s", msg, c.RemoteAddr())
 		// writing to the wire can be faster (theoretically) than lauching the asynchWaitForCallback
 		// so we first prepare the reception (if any)
 		var ch chan *Response
@@ -617,9 +631,9 @@ func (this *Wire) writer(c net.Conn) {
 			// wait the reply asynchronously
 			ch = this.asynchWaitForCallback(msg)
 		}
-		err := this.write(c, msg)
-
+		var err = this.write(c, msg)
 		if err != nil {
+			logger.Errorf("Error while writing to %s", c.RemoteAddr())
 			if ch != nil {
 				ch <- nil // stop waiting for calback
 			}
@@ -787,7 +801,7 @@ loop:
 				var r = NewResponse(this, c, kind, seq, data)
 				cb <- &r
 			} else {
-				logger.Errorf("No callback found for kind=%s, sequence=%d.", kind, seq)
+				logger.Errorf("No callback found in %s for kind=%s, sequence=%d.", this.conn.LocalAddr(), kind, seq)
 			}
 		}
 	}
@@ -804,8 +818,8 @@ loop:
 
 // Executes the function that handles the request. By default the reply of this handler is allways final (REQ or ERR).
 // If we wish  to send multiple replies, we must cancel the response and then send the several replies.
-func (this *Wire) runHandler() {
-	for msgconn := range this.handlerch {
+func (this *Wire) runHandler(handlerch chan EnvelopeConn) {
+	for msgconn := range handlerch {
 		msg := msgconn.message
 		c := msgconn.conn
 
@@ -953,7 +967,7 @@ func CreateResponseHandler(codec Codec, fun interface{}) func(Response) {
 				p = reflect.New(payloadType)
 				var e = codec.Decode(ctx.reply, p.Interface())
 				if e != nil {
-					logger.Errorf("[deserializeHandshake] Unable to decode %s; cause=%s", ctx.reply, e)
+					logger.Errorf("[CreateResponseHandler] Unable to decode %s; cause=%s", ctx.reply, e)
 					ctx.fault = e
 				}
 				params = append(params, p.Elem())
@@ -1086,6 +1100,7 @@ type handler struct {
 }
 
 type ClientServer struct {
+	uuid     []byte
 	muhnd    sync.RWMutex
 	handlers []handler
 
@@ -1093,12 +1108,16 @@ type ClientServer struct {
 	muconn    sync.RWMutex
 	OnConnect func(w *Wire)
 	OnClose   func(c net.Conn)
+	Name      string
 }
 
 func NewClientServer() ClientServer {
+	var uuid = NewUUID()
 	return ClientServer{
 		timeout:  time.Second * 10,
 		handlers: make([]handler, 0),
+		uuid:     uuid,
+		Name:     fmt.Sprintf("%X", uuid),
 	}
 }
 
@@ -1180,8 +1199,8 @@ type Client struct {
 	reconnectInterval    time.Duration
 	reconnectMaxInterval time.Duration
 	sendListeners        map[uint64]SendListener
-	newTopicListeners    map[uint64]func(string)
-	dropTopicListeners   map[uint64]func(string)
+	newTopicListeners    map[uint64]TopicListener
+	dropTopicListeners   map[uint64]TopicListener
 	listenersIdx         uint64
 }
 
@@ -1192,8 +1211,8 @@ func NewClient() *Client {
 		reconnectMaxInterval: time.Second,
 		wire:                 NewWire(JsonCodec{}),
 		sendListeners:        make(map[uint64]SendListener),
-		newTopicListeners:    make(map[uint64]func(string)),
-		dropTopicListeners:   make(map[uint64]func(string)),
+		newTopicListeners:    make(map[uint64]TopicListener),
+		dropTopicListeners:   make(map[uint64]TopicListener),
 	}
 	this.ClientServer = NewClientServer()
 
@@ -1248,10 +1267,10 @@ func (this *Client) fireSendListeners(event SendEvent) {
 	}
 }
 
-func (this *Client) AddNewTopicListener(listener func(string)) uint64 {
+func (this *Client) AddNewTopicListener(listener TopicListener) uint64 {
 	if this.wire.OnNewTopic == nil {
-		this.wire.OnNewTopic = func(topic string) {
-			this.fireNewTopicListeners(topic)
+		this.wire.OnNewTopic = func(event TopicEvent) {
+			this.fireNewTopicListeners(event)
 		}
 	}
 	var idx = atomic.AddUint64(&this.listenersIdx, 1)
@@ -1264,16 +1283,16 @@ func (this *Client) RemoveNewTopicListener(idx uint64) {
 	delete(this.newTopicListeners, idx)
 }
 
-func (this *Client) fireNewTopicListeners(topic string) {
+func (this *Client) fireNewTopicListeners(event TopicEvent) {
 	for _, listener := range this.newTopicListeners {
-		listener(topic)
+		listener(event)
 	}
 }
 
-func (this *Client) AddDropTopicListener(listener func(string)) uint64 {
+func (this *Client) AddDropTopicListener(listener TopicListener) uint64 {
 	if this.wire.OnDropTopic == nil {
-		this.wire.OnDropTopic = func(topic string) {
-			this.fireDropTopicListener(topic)
+		this.wire.OnDropTopic = func(event TopicEvent) {
+			this.fireDropTopicListener(event)
 		}
 	}
 	var idx = atomic.AddUint64(&this.listenersIdx, 1)
@@ -1286,9 +1305,9 @@ func (this *Client) RemoveDropTopicListener(idx uint64) {
 	delete(this.dropTopicListeners, idx)
 }
 
-func (this *Client) fireDropTopicListener(topic string) {
+func (this *Client) fireDropTopicListener(event TopicEvent) {
 	for _, listener := range this.dropTopicListeners {
-		listener(topic)
+		listener(event)
 	}
 }
 
@@ -1334,20 +1353,22 @@ func (this *Client) handshake(c net.Conn) error {
 	}
 	this.muhnd.RUnlock()
 
-	err := serializeHanshake(c, this.wire.codec, this.timeout, this.wire.uuid, payload)
+	err := serializeHanshake(c, this.wire.codec, this.timeout, this.uuid, payload)
 	if err != nil {
 		return err
 	}
 
 	// get reply
-	_, group, remoteTopics, err := deserializeHandshake(c, this.wire.codec, this.timeout)
+	uuid, group, remoteTopics, err := deserializeHandshake(c, this.wire.codec, this.timeout)
 	if err != nil {
 		return err
 	}
 	this.wire.mutop.Lock()
+	this.wire.remoteUuid = uuid
 	this.wire.remoteTopics = remoteTopics
+	var addr = c.RemoteAddr().String()
 	for k := range remoteTopics {
-		this.fireNewTopicListeners(k)
+		this.fireNewTopicListeners(TopicEvent{this.wire.remoteUuid, addr, k})
 	}
 	this.wire.remoteGroupID = group
 	this.wire.mutop.Unlock()
@@ -1464,8 +1485,8 @@ func (this *Client) Destroy() {
 	this.reconnectInterval = 0
 	this.wire.Destroy()
 	this.sendListeners = make(map[uint64]SendListener)
-	this.newTopicListeners = make(map[uint64]func(string))
-	this.dropTopicListeners = make(map[uint64]func(string))
+	this.newTopicListeners = make(map[uint64]TopicListener)
+	this.dropTopicListeners = make(map[uint64]TopicListener)
 	atomic.StoreUint64(&this.listenersIdx, 0)
 	this.Disconnect()
 }
@@ -1484,9 +1505,9 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 		// gets the connection
 		c, err = net.DialTimeout("tcp", this.addr, time.Second)
 		if err != nil {
-			logger.Debugf("[dial] %X: failed to connect to %s", this.wire.uuid, this.addr)
+			logger.Tracef("[dial] %s: failed to connect to %s", this.Name, this.addr)
 			if this.reconnectInterval > 0 {
-				logger.Debugf("[dial] %X: retry connecting to %s in %v", this.wire.uuid, this.addr, retry)
+				logger.Tracef("[dial] %s: retry connecting to %s in %v", this.Name, this.addr, retry)
 				time.Sleep(retry)
 				if this.reconnectMaxInterval > 0 && retry < this.reconnectMaxInterval {
 					retry = retry * 2
@@ -1495,7 +1516,7 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 					}
 				}
 			} else {
-				logger.Debugf("[dial] %X: NO retry will be performed to %s!", this.wire.uuid, this.addr)
+				logger.Tracef("[dial] %X: NO retry will be performed to %s!", this.uuid, this.addr)
 				return
 			}
 		} else {
@@ -1503,7 +1524,7 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 		}
 	}
 
-	logger.Debugf("[dial] %X: connected to %s", this.wire.uuid, this.addr)
+	logger.Tracef("[dial] %s: connected to %s", c.LocalAddr(), this.addr)
 
 	this.muconn.Lock()
 	defer this.muconn.Unlock()
@@ -1511,7 +1532,7 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 	// topic exchange
 	err = this.handshake(c)
 	if err != nil {
-		logger.Errorf("[dial] %X: error while handshaking %s: %s", this.wire.uuid, this.addr, err)
+		logger.Errorf("[dial] %s: error while handshaking %s: %s", c.LocalAddr(), this.addr, err)
 		this.wire.SetConn(nil)
 		c.Close()
 	} else {
@@ -1630,8 +1651,8 @@ type Wires struct {
 	cursor             int
 	codec              Codec
 	sendListeners      map[uint64]SendListener
-	newTopicListeners  map[uint64]func(string)
-	dropTopicListeners map[uint64]func(string)
+	newTopicListeners  map[uint64]TopicListener
+	dropTopicListeners map[uint64]TopicListener
 	listenersIdx       uint64
 	loadBalancer       LoadBalancer
 	rateLimiterFactory func() toolkit.Rate
@@ -1647,6 +1668,14 @@ type SendEvent struct {
 	Handler interface{}
 }
 
+type TopicListener func(event TopicEvent)
+
+type TopicEvent struct {
+	Source     []byte // source uuid
+	SourceAddr string
+	Name       string // topic name
+}
+
 // NewWires creates a Wires structure
 func NewWires(codec Codec) *Wires {
 	return &Wires{
@@ -1654,8 +1683,8 @@ func NewWires(codec Codec) *Wires {
 		groups:             make(map[string][]*Wire),
 		codec:              codec,
 		sendListeners:      make(map[uint64]SendListener),
-		newTopicListeners:  make(map[uint64]func(string)),
-		dropTopicListeners: make(map[uint64]func(string)),
+		newTopicListeners:  make(map[uint64]TopicListener),
+		dropTopicListeners: make(map[uint64]TopicListener),
 		loadBalancer:       NewSimpleLB(),
 		bufferSize:         1000,
 	}
@@ -1679,7 +1708,7 @@ func (this *Wires) fireSendListener(event SendEvent) {
 	}
 }
 
-func (this *Wires) AddNewTopicListener(listener func(string)) uint64 {
+func (this *Wires) AddNewTopicListener(listener TopicListener) uint64 {
 	this.Lock()
 	defer this.Unlock()
 
@@ -1696,13 +1725,13 @@ func (this *Wires) RemoveNewTopicListener(idx uint64) {
 	delete(this.newTopicListeners, idx)
 }
 
-func (this *Wires) fireNewTopicListener(topic string) {
+func (this *Wires) fireNewTopicListener(event TopicEvent) {
 	for _, listener := range this.newTopicListeners {
-		listener(topic)
+		listener(event)
 	}
 }
 
-func (this *Wires) AddDropTopicListener(listener func(string)) uint64 {
+func (this *Wires) AddDropTopicListener(listener TopicListener) uint64 {
 	this.Lock()
 	defer this.Unlock()
 
@@ -1719,9 +1748,9 @@ func (this *Wires) RemoveDropTopicListener(idx uint64) {
 	delete(this.dropTopicListeners, idx)
 }
 
-func (this *Wires) fireDropTopicListener(topic string) {
+func (this *Wires) fireDropTopicListener(event TopicEvent) {
 	for _, listener := range this.dropTopicListeners {
-		listener(topic)
+		listener(event)
 	}
 }
 
@@ -1768,8 +1797,8 @@ func (this *Wires) Destroy() {
 	this.wires = make([]*Wire, 0)
 	this.groups = make(map[string][]*Wire)
 	this.sendListeners = make(map[uint64]SendListener)
-	this.newTopicListeners = make(map[uint64]func(string))
-	this.dropTopicListeners = make(map[uint64]func(string))
+	this.newTopicListeners = make(map[uint64]TopicListener)
+	this.dropTopicListeners = make(map[uint64]TopicListener)
 	atomic.StoreUint64(&this.listenersIdx, 0)
 	this.cursor = 0
 }
@@ -1792,19 +1821,14 @@ func (this *Wires) Add(wire *Wire) {
 	}
 
 	// define trigger on new topic
-	wire.OnNewTopic = func(name string) {
-		for _, w := range this.wires {
-			// if already exists ignore
-			if w.hasRemoteTopic(name) {
-				return
-			}
-		}
-		this.fireNewTopicListener(name)
+	wire.OnNewTopic = func(event TopicEvent) {
+		this.fireNewTopicListener(event)
 	}
 
+	var addr = wire.conn.RemoteAddr().String()
 	for k := range wire.remoteTopics {
 		// use trigger
-		wire.OnNewTopic(k)
+		wire.OnNewTopic(TopicEvent{wire.remoteUuid, addr, k})
 	}
 
 	this.wires = append(this.wires, wire)
@@ -1844,19 +1868,14 @@ func (this *Wires) Kill(conn net.Conn) {
 
 	if w != nil {
 		// define trigger on drop topic
-		w.OnDropTopic = func(topic string) {
-			for _, w := range this.wires {
-				// if still exists ignore
-				if w.hasRemoteTopic(topic) {
-					return
-				}
-			}
-			this.fireDropTopicListener(topic)
+		w.OnDropTopic = func(event TopicEvent) {
+			this.fireDropTopicListener(event)
 		}
 
+		var addr = w.conn.RemoteAddr().String()
 		for k := range w.remoteTopics {
 			// use trigger
-			w.OnDropTopic(k)
+			w.OnDropTopic(TopicEvent{w.remoteUuid, addr, k})
 		}
 
 		this.loadBalancer.Remove(w)
@@ -2059,7 +2078,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 			if id == noGROUP {
 				for _, w := range wiresTriage(name, group, skipWire) {
 					// increment reply counter
-					logger.Debugf("[SendSkip] sending message to %s (ungrouped)", w.Conn().RemoteAddr())
+					logger.Tracef("[SendSkip] sending message to %s (ungrouped)", w.Conn().RemoteAddr())
 					wg.Add(1)
 					ch := this.send(w, msg)
 					go func() {
@@ -2082,7 +2101,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 					var size = len(ws)
 					for i := 0; i < size; i++ {
 						var w = this.loadBalancer.Next(name, ws)
-						logger.Debugf("[SendSkip] sending message to %s (group %s)", w.Conn().RemoteAddr(), id)
+						logger.Tracef("[SendSkip] sending message to %s (group %s)", w.Conn().RemoteAddr(), id)
 						// waits for the request completion
 						e := <-this.send(w, msg)
 						// send only to one.
@@ -2101,7 +2120,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 		go func() {
 			// Wait for all requests to complete.
 			wg.Wait()
-			logger.Debugf("[SendSkip] all requests finnished")
+			logger.Tracef("[SendSkip] all requests finnished")
 			// pass the end mark
 			if handler != nil {
 				handler(NewResponse(skipWire, nil, ACK, 0, nil))
@@ -2158,14 +2177,14 @@ func (this *Server) Listen(service string) error {
 	if this.OnBind != nil {
 		this.OnBind(l)
 	}
-	logger.Debugf("[Listen] listening at %s", l.Addr())
+	logger.Tracef("[Listen] listening at %s", l.Addr())
 	go func() {
 		for {
 			// notice that c is changed in the disconnect function
 			c, err := l.Accept()
 			if err != nil {
 				// happens when the listener is closed
-				logger.Infof("[Listen] Stoped listening at %s", l.Addr())
+				logger.Debugf("[Listen] Stoped listening at %s", l.Addr())
 				return
 			}
 			wire := NewWire(this.codec)
@@ -2173,7 +2192,7 @@ func (this *Server) Listen(service string) error {
 
 			// topic exchange
 			group, remoteTopics, err := this.handshake(c, wire)
-			logger.Debugf("[Listen] %s: accepted connection from %X", l.Addr(), wire.uuid)
+			logger.Tracef("[Listen] %s: accepted connection from %s", l.Addr(), c.RemoteAddr())
 
 			if err != nil {
 				c.Close()
@@ -2189,9 +2208,9 @@ func (this *Server) Listen(service string) error {
 					if c == conn {
 						// handle errors during a connection
 						if faults.Has(e, io.EOF) || isClosed(e) {
-							logger.Infof("[wire.disconnected] client %X closed connection", wire.uuid)
+							logger.Debugf("[wire.disconnected] client %s - closed connection", conn.RemoteAddr())
 						} else if e != nil {
-							logger.Errorf("[wire.disconnected] client %X droped with error: %s", wire.uuid, faults.Wrap(e))
+							logger.Errorf("[wire.disconnected] client %s droped with error: %s", conn.RemoteAddr(), faults.Wrap(e))
 						}
 
 						this.Wires.Kill(conn)
@@ -2202,9 +2221,9 @@ func (this *Server) Listen(service string) error {
 					}
 				}
 
-				this.Wires.Add(wire)
-
 				wire.SetConn(c)
+
+				this.Wires.Add(wire)
 
 				if this.OnConnect != nil {
 					this.OnConnect(wire)
@@ -2227,7 +2246,7 @@ func (this *Server) handshake(c net.Conn, wire *Wire) (string, map[string]bool, 
 		return "", nil, err
 	}
 	// use the uuid from the client
-	wire.uuid = uuid
+	wire.remoteUuid = uuid
 
 	// send identity and local topics
 	this.muhnd.RLock()
@@ -2241,7 +2260,7 @@ func (this *Server) handshake(c net.Conn, wire *Wire) (string, map[string]bool, 
 	}
 	this.muhnd.RUnlock()
 
-	err = serializeHanshake(c, wire.codec, this.timeout, make([]byte, 16), topics)
+	err = serializeHanshake(c, wire.codec, this.timeout, this.uuid, topics)
 	if err != nil {
 		return "", nil, err
 	}
@@ -2317,15 +2336,31 @@ func (this *Server) Route(name string, timeout time.Duration, before func(x *Req
 			return
 		}
 
-		wire := r.wire
-		this.SendSkip(wire, r.Kind, r.Name, r.Payload(), func(resp Response) {
+		/*
+			We defer the reply with req.DeferReply(),
+			and then we send the reply when it comes with req.ReplyAs().
+		*/
+		var err = <-this.SendSkip(r.wire, r.Kind, r.Name, r.Payload(), func(resp Response) {
 			if after != nil {
 				// do something (ex: store the response data)
 				after(&resp)
 			}
 
-			wire.reply(resp.Kind, r.sequence, resp.Reply()) // sending data to the caller
+			// make sure that when asking for REQALL, we reply as REP_PARTIAL
+			var kind EKind
+			if r.Kind == REQALL && resp.Kind != ACK {
+				kind = REP_PARTIAL
+			} else {
+				kind = resp.Kind
+			}
+			// sending data to the caller
+			r.ReplyAs(kind, resp.Reply())
 		}, timeout)
+		if err != nil {
+			r.ReplyAs(ERR, []byte(err.Error()))
+		}
+		// avoids sending the REP kind when exiting
+		r.DeferReply()
 	})
 }
 
@@ -2376,34 +2411,30 @@ func Route(name string, src Handler, dest Sender, relayTimeout time.Duration, be
 		}
 
 		/*
-			There are two ways of doing the following code. Either one is fine (need to test more).
-			The first one, implemented here, we wait for the completion of dest.Send() with <-.
-			The second one, the commented code, we don't wait with <-
-			and we defer the reply with req.DeferReply(),
+			We defer the reply with req.DeferReply(),
 			and then we send the reply when it comes with req.ReplyAs().
 		*/
-		// (1rst)
-		var kind EKind
-		var reply []byte
-		// (1rst)
-		<-dest.Send(req.Kind, req.Name, req.Payload(), func(resp Response) {
+		var err = <-dest.Send(req.Kind, req.Name, req.Payload(), func(resp Response) {
 			if after != nil {
 				after(&resp)
 			}
 
-			// (1rst)
-			kind = resp.Kind
-			reply = resp.Reply()
-
-			// (2nd)
-			//req.ReplyAs(resp.Kind, resp.Reply())
+			// make sure that when asking for REQALL, we reply as REP_PARTIAL
+			var kind EKind
+			if req.Kind == REQALL && resp.Kind != ACK {
+				kind = REP_PARTIAL
+			} else {
+				kind = resp.Kind
+			}
+			req.ReplyAs(kind, resp.Reply())
 		}, relayTimeout)
 
-		// (1rst)
-		req.ReplyAs(kind, reply)
+		if err != nil {
+			req.ReplyAs(ERR, []byte(err.Error()))
+		}
 
-		// (2nd)
-		//req.DeferReply()
+		// avoids sending the kind=REP when exiting
+		req.DeferReply()
 	})
 
 }

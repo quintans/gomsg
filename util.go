@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func ExternalIP() (string, error) {
+func IP() (string, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return "", err
@@ -43,31 +43,6 @@ func ExternalIP() (string, error) {
 		}
 	}
 	return "", errors.New("are you connected to the network?")
-}
-
-type PollItem struct {
-	Index int
-	Error interface{}
-}
-
-// from an array of channels returning the first to complete
-func Poll(chans []chan interface{}, timeout time.Duration) PollItem {
-	out := make(chan PollItem, len(chans)+1)
-	go func() {
-		time.Sleep(timeout)
-		out <- PollItem{-1, nil}
-	}()
-	for k, v := range chans {
-		go func(i int, errch chan interface{}) {
-			select {
-			case <-time.After(timeout):
-			case e := <-errch:
-				out <- PollItem{i, e}
-			}
-		}(k, v)
-	}
-	// only the first matters
-	return <-out
 }
 
 type Looper struct {

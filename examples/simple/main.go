@@ -2,16 +2,20 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/quintans/gomsg"
 )
 
+func wait() {
+	time.Sleep(time.Millisecond * 10)
+}
+
 func main() {
 	server := gomsg.NewServer()
 	server.SetTimeout(time.Second)
 	server.Listen(":7777")
+	wait()
 
 	cli := gomsg.NewClient()
 	cli.Handle("REVERSE", func(ctx *gomsg.Request, m string) (string, error) {
@@ -22,7 +26,7 @@ func main() {
 	if err != nil {
 		fmt.Println("===> ERROR:", err)
 	}
-	time.Sleep(time.Second * 2)
+	wait()
 
 	/*
 		cli2 := gomsg.NewClient()
@@ -53,12 +57,11 @@ func main() {
 		}, time.Second)
 	*/
 
-	time.Sleep(time.Second * 2)
+	wait()
 	fmt.Println("I: close...")
 	cli.Destroy()
 	server.Destroy()
-	time.Sleep(time.Second * 2)
-	os.Exit(0)
+	wait()
 }
 
 func reverse(m string) string {

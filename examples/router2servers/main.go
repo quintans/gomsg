@@ -12,6 +12,10 @@ const (
 	REPLY   = "Hello World!"
 )
 
+func wait() {
+	time.Sleep(time.Millisecond * 10)
+}
+
 func main() {
 	// routing requests between server 1 and server 2
 	server1 := gomsg.NewServer()
@@ -20,6 +24,8 @@ func main() {
 	server2 := gomsg.NewServer()
 	server2.SetTimeout(time.Second)
 	server2.Listen(":7778")
+	wait()
+
 	// all (*) messages arriving to server 1 are routed to server 2
 	gomsg.Route("*", server1, server2, time.Second,
 		func(ctx *gomsg.Request) bool {
@@ -30,7 +36,7 @@ func main() {
 
 	// client 1 connects to server 1
 	cli := gomsg.NewClient()
-	cli.Connect("localhost:7777")
+	<-cli.Connect("localhost:7777")
 
 	cli2 := gomsg.NewClient()
 	cli2.Handle("HELLO", func(ctx *gomsg.Request, m string) (string, error) {
@@ -41,7 +47,7 @@ func main() {
 		return fmt.Sprintf("Hello %s", m), nil
 	})
 	// client 2 connects to server 2
-	cli2.Connect("localhost:7778")
+	<-cli2.Connect("localhost:7778")
 
 	var err error
 	/*
@@ -62,5 +68,5 @@ func main() {
 
 	time.Sleep(time.Second * 3)
 	cli.Destroy()
-	time.Sleep(time.Millisecond * 100)
+	wait()
 }

@@ -12,8 +12,19 @@ const (
 	CLEAN_CYCLE = time.Second
 )
 
+/*
+func init() {
+	log.Register("/", log.TRACE).ShowCaller(true)
+}
+*/
+
+func wait() {
+	time.Sleep(time.Millisecond * 20)
+}
+
 func main() {
 	server := gomsg.NewServer()
+	server.Name = "Server"
 	// keep alive
 	var timeout = gomsg.NewTimeout(CLEAN_CYCLE, time.Second, func(o interface{}) {
 		c := o.(net.Conn)
@@ -21,7 +32,7 @@ func main() {
 		server.Wires.Kill(c)
 	})
 
-	server.OnConnect = func(w *gomsg.Wired) {
+	server.OnConnect = func(w *gomsg.Wire) {
 		// starts monitoring
 		timeout.Delay(w.Conn())
 	}
@@ -42,36 +53,44 @@ func main() {
 		nil)
 
 	server.Listen(":7777")
+	wait()
 
 	cli := gomsg.NewClient()
+	cli.Name = "Cli#1"
 	cli.SetReconnectInterval(0)
 	cli.Handle("HELLO", func(ctx *gomsg.Request, m string) (string, error) {
 		fmt.Println("<=== [1] processing:", m, "from", ctx.Connection().RemoteAddr())
 		return fmt.Sprintf("[1] Hello %s", m), nil
 	})
-	cli.Connect("localhost:7777")
+	<-cli.Connect("localhost:7777")
 
 	// just to get in the way
 	cli3 := gomsg.NewClient()
+	cli3.Name = "Cli#3"
 	cli3.SetReconnectInterval(0)
-	cli3.Connect("localhost:7777")
+	<-cli3.Connect("localhost:7777")
 
 	cli2 := gomsg.NewClient()
+	cli2.Name = "Cli#2"
 	cli2.SetReconnectInterval(0)
 	cli2.Handle("HELLO", func(ctx *gomsg.Request, m string) (string, error) {
 		fmt.Println("<=== [2] processing:", m, "from", ctx.Connection().RemoteAddr())
 		return fmt.Sprintf("[2] Hello %s", m), nil
 	})
-	cli2.Connect("localhost:7777")
+	<-cli2.Connect("localhost:7777")
 
-	<-cli3.RequestAll("HELLO", "World!", func(ctx gomsg.Response, r string, e error) {
-		fmt.Println("===HELLO===> reply:", r, e, "from", ctx.Connection().RemoteAddr())
+	var err = <-cli3.RequestAll("HELLO", "Hello", func(ctx gomsg.Response, r string, e error) {
+		fmt.Println("=[3]==HELLO===> reply:", r, e, "from", ctx.Connection().RemoteAddr())
 	})
+	if err != nil {
+		fmt.Println("Error on calling the first HELLO:", err)
+	}
 
 	time.Sleep(time.Millisecond * 2000)
-	<-cli3.RequestAll("HELLO", "World!", func(ctx gomsg.Response, r string, e error) {
-		fmt.Println("===HELLO===> reply:", r, e, "from", ctx.Connection().RemoteAddr())
+	err = <-cli3.RequestAll("HELLO", "World!", func(ctx gomsg.Response, r string, e error) {
+		fmt.Println("=[3]==HELLO===> reply:", r, e, "from", ctx.Connection().RemoteAddr())
 	})
-
-	time.Sleep(time.Millisecond * 1000)
+	if err != nil {
+		fmt.Println("Error on calling the second HELLO:", err)
+	}
 }

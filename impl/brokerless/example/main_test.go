@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"os"
+	"testing"
 	"time"
 
 	"github.com/quintans/gomsg"
@@ -15,7 +15,7 @@ func wait() {
 }
 
 func init() {
-	log.Register("/", log.INFO).ShowCaller(true)
+	log.Register("/", log.DEBUG).ShowCaller(true)
 }
 
 const (
@@ -24,7 +24,7 @@ const (
 
 var codec = gomsg.JsonCodec{}
 
-func main() {
+func TestBrokerless(t *testing.T) {
 	var mw = func(r *gomsg.Request) {
 		fmt.Println("##### Calling endpoint #####", r.Name)
 		defer fmt.Println("##### Called endpoint #####", r.Name)
@@ -38,8 +38,8 @@ func main() {
 		greet++
 		return "#1: hi " + greeting
 	})
-	cli1.AddNewTopicListener(func(name string) {
-		fmt.Println("=====> #1: remote topic: ", name)
+	cli1.AddNewTopicListener(func(event gomsg.TopicEvent) {
+		fmt.Println("=====> #1: remote topic: ", event.SourceAddr, event.Name)
 	})
 	cli1.Connect(":7001")
 
@@ -80,12 +80,10 @@ func main() {
 		fmt.Println("=====>", str)
 	})
 	if replies != 2 {
-		fmt.Println("ERROR =====> expected 2 replies, got", replies)
-		os.Exit(1)
+		t.Fatal("ERROR =====> expected 2 replies, got", replies)
 	}
 	if greet != 1 {
-		fmt.Println("ERROR =====> expected 1 greet, got", greet)
-		os.Exit(1)
+		t.Fatal("ERROR =====> expected 1 greet, got", greet)
 	}
 
 	// replies should rotate

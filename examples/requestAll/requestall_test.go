@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"os"
+	"testing"
 	"time"
 
 	"github.com/quintans/gomsg"
@@ -12,7 +12,7 @@ func wait() {
 	time.Sleep(time.Millisecond * 20)
 }
 
-func main() {
+func TestRequestAll(t *testing.T) {
 	server := gomsg.NewServer()
 	server.SetTimeout(time.Second)
 	server.Listen(":7777")
@@ -46,13 +46,11 @@ func main() {
 	wait()
 
 	if clicount != 2 {
-		fmt.Println("Expected 2 client replies, got", clicount)
-		os.Exit(1)
+		t.Fatal("Expected 2 client replies, got", clicount)
 	}
 
 	if srvcount != 3 {
-		fmt.Println("Expected 2 server hits, got", srvcount)
-		os.Exit(1)
+		t.Fatal("Expected 2 server hits, got", srvcount)
 	}
 
 	fmt.Println("I: close...")

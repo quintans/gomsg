@@ -46,10 +46,7 @@ import (
 
 	"github.com/quintans/toolkit"
 	"github.com/quintans/toolkit/faults"
-	"github.com/quintans/toolkit/log"
 )
-
-var logger = log.LoggerFor("github.com/quintans/gomsg")
 
 const (
 	_   EKind = iota

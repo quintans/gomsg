@@ -12,12 +12,6 @@ const (
 	CLEAN_CYCLE = time.Second
 )
 
-/*
-func init() {
-	log.Register("/", log.TRACE).ShowCaller(true)
-}
-*/
-
 func wait() {
 	time.Sleep(time.Millisecond * 20)
 }

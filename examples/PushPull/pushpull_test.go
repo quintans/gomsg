@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"testing"
 	"time"
 
 	"github.com/quintans/gomsg"
@@ -22,7 +23,7 @@ func wait() {
 	time.Sleep(time.Millisecond * 100)
 }
 
-func main() {
+func TestPushPull(t *testing.T) {
 	server := gomsg.NewServer()
 	server.Listen(SERVER_PORT_1)
 	defer server.Destroy()
@@ -64,14 +65,14 @@ func main() {
 	// will receive the message
 	e = <-server.Push(CONSUMER, MESSAGE)
 	if e != nil {
-		fmt.Printf("Error: %s\n", e)
+		t.Fatalf("Error: %s\n", e)
 	}
 
 	if received1 != 1 {
-		fmt.Printf("Expected '%v', got '%v'\n", 1, received1)
+		t.Fatalf("Expected '%v', got '%v'\n", 1, received1)
 	}
 
 	if received2 != 1 {
-		fmt.Printf("Expected '%v', got '%v'\n", 1, received2)
+		t.Fatalf("Expected '%v', got '%v'\n", 1, received2)
 	}
 }

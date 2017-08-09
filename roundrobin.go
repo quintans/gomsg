@@ -23,7 +23,7 @@ type RoundRobinLB struct {
 func NewRoundRobinLB() RoundRobinLB {
 	return RoundRobinLB{
 		Stickies:   make(map[string]*Sticky),
-		quarantine: time.Minute,
+		quarantine: time.Second * 5,
 	}
 }
 
@@ -44,14 +44,14 @@ func (lb RoundRobinLB) Remove(w *Wire) {
 	lb.Unstick(w)
 }
 
-func (lb RoundRobinLB) BeforeSend(w *Wire, msg Envelope) {
+func (lb RoundRobinLB) Prepare(w *Wire, msg Envelope) {
 	atomic.AddUint64(&lb.counter, 1)
 }
 
-func (lb RoundRobinLB) AfterSend(w *Wire, msg Envelope) {
+func (lb RoundRobinLB) Success(w *Wire, msg Envelope) {
 }
 
-func (lb RoundRobinLB) Error(w *Wire, msg Envelope, err error) {
+func (lb RoundRobinLB) Failure(w *Wire, msg Envelope, err error) {
 	var load *Quarentine
 	if w.load == nil {
 		load = new(Quarentine)

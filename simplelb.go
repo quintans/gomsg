@@ -10,6 +10,7 @@ var _ LoadBalancer = SimpleLB{}
 
 type Load struct {
 	value           uint64
+	failures        int
 	quarantineUntil time.Time
 }
 
@@ -17,14 +18,20 @@ type SimpleLB struct {
 	sync.RWMutex
 	Stickies
 
-	quarantine time.Duration
+	maxFailures int
+	quarantine  time.Duration
 }
 
 func NewSimpleLB() SimpleLB {
 	return SimpleLB{
-		Stickies:   make(map[string]*Sticky),
-		quarantine: time.Minute,
+		Stickies:    make(map[string]*Sticky),
+		quarantine:  time.Second * 5,
+		maxFailures: 2,
 	}
+}
+
+func (lb SimpleLB) MaxFailures(maxFailures int) {
+	lb.maxFailures = maxFailures
 }
 
 func (lb SimpleLB) SetQuarantine(quarantine time.Duration) {
@@ -45,17 +52,22 @@ func (lb SimpleLB) Remove(w *Wire) {
 	lb.Unstick(w)
 }
 
-func (lb SimpleLB) BeforeSend(w *Wire, msg Envelope) {
+func (lb SimpleLB) Prepare(w *Wire, msg Envelope) {
 	var load = w.load.(*Load)
 	atomic.AddUint64(&load.value, 1)
 }
 
-func (lb SimpleLB) AfterSend(w *Wire, msg Envelope) {
+func (lb SimpleLB) Success(w *Wire, msg Envelope) {
+	var load = w.load.(*Load)
+	load.failures = 0
 }
 
-func (lb SimpleLB) Error(w *Wire, msg Envelope, err error) {
+func (lb SimpleLB) Failure(w *Wire, msg Envelope, err error) {
 	var load = w.load.(*Load)
-	load.quarantineUntil = time.Now().Add(lb.quarantine)
+	load.failures++
+	if load.failures >= lb.maxFailures {
+		load.quarantineUntil = time.Now().Add(lb.quarantine)
+	}
 
 	lb.Lock()
 	defer lb.Unlock()

@@ -6,7 +6,12 @@ import (
 
 	"github.com/quintans/gomsg"
 	"github.com/quintans/gomsg/impl/peerdirectory"
+	"github.com/quintans/toolkit/log"
 )
+
+func init() {
+	gomsg.SetLogger(log.LoggerFor("github.com/quintans/gmsg"))
+}
 
 const (
 	peerTimeout   = time.Second * 10

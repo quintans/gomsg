@@ -12,7 +12,7 @@ import (
 
 func init() {
 	log.Register("/", log.WARN).ShowCaller(true)
-	gomsg.SetLogger(log.LoggerFor("/"))
+	gomsg.SetLogger(log.LoggerFor("github.com/quintans/gmsg"))
 }
 
 const TOPIC = "ToPic"

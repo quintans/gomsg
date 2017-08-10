@@ -5,6 +5,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/quintans/gomsg"
 	"github.com/quintans/gomsg/impl/servicedirectory"
 	"github.com/quintans/toolkit/log"
 )
@@ -20,6 +21,7 @@ func wait() {
 
 func init() {
 	log.Register("/", log.DEBUG).ShowCaller(true)
+	gomsg.SetLogger(log.LoggerFor("github.com/quintans/gmsg"))
 }
 
 func main() {

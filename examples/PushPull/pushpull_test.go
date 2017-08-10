@@ -6,7 +6,12 @@ import (
 	"time"
 
 	"github.com/quintans/gomsg"
+	"github.com/quintans/toolkit/log"
 )
+
+func init() {
+	gomsg.SetLogger(log.LoggerFor("github.com/quintans/gmsg"))
+}
 
 const (
 	SERVER_PORT_1 = ":7777"

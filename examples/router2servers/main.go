@@ -5,12 +5,17 @@ import (
 	"time"
 
 	"github.com/quintans/gomsg"
+	"github.com/quintans/toolkit/log"
 )
 
 const (
 	MESSAGE = "World!"
 	REPLY   = "Hello World!"
 )
+
+func init() {
+	gomsg.SetLogger(log.LoggerFor("github.com/quintans/gmsg"))
+}
 
 func wait() {
 	time.Sleep(time.Millisecond * 10)

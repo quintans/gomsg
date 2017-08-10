@@ -11,6 +11,7 @@ import (
 
 func init() {
 	log.Register("/", log.DEBUG).ShowCaller(true)
+	gomsg.SetLogger(log.LoggerFor("github.com/quintans/gmsg"))
 }
 
 func wait() {

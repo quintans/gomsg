@@ -546,7 +546,7 @@ func (this *Wire) Send(msg Envelope) <-chan error {
 	// check first if the peer has the topic before sending.
 	// This is done because remote topics are only available after a connection
 	if test(msg.kind, PUB, PUSH, REQ, REQALL) && !this.hasRemoteTopic(msg.name) {
-		msg.errch <- UnknownTopic(faults.New(UNKNOWNTOPIC, msg.name))
+		msg.errch <- UnknownTopic(fmt.Errorf(UNKNOWNTOPIC, msg.name))
 		return msg.errch
 	}
 
@@ -1101,7 +1101,6 @@ type ClientServer struct {
 	muhnd    sync.RWMutex
 	handlers []handler
 
-	timeout   time.Duration
 	muconn    sync.RWMutex
 	OnConnect func(w *Wire)
 	OnClose   func(c net.Conn)
@@ -1111,7 +1110,6 @@ type ClientServer struct {
 func NewClientServer() ClientServer {
 	var uuid = NewUUID()
 	return ClientServer{
-		timeout:  time.Second * 10,
 		handlers: make([]handler, 0),
 		uuid:     uuid,
 		Name:     fmt.Sprintf("%X", uuid),
@@ -1148,11 +1146,6 @@ func (this *ClientServer) addHandler(name string, hnds []Middleware) {
 
 	this.handlers = append(this.handlers, handler{name, hnds})
 
-}
-
-// SetTimeout sets the timeout used to send data
-func (this *ClientServer) SetTimeout(timeout time.Duration) {
-	this.timeout = timeout
 }
 
 // If the type of the payload is *mybus.Msg
@@ -1199,6 +1192,7 @@ type Client struct {
 	newTopicListeners    map[uint64]TopicListener
 	dropTopicListeners   map[uint64]TopicListener
 	listenersIdx         uint64
+	defaultTimeout       time.Duration
 }
 
 // NewClient creates a Client
@@ -1210,6 +1204,7 @@ func NewClient() *Client {
 		sendListeners:        make(map[uint64]SendListener),
 		newTopicListeners:    make(map[uint64]TopicListener),
 		dropTopicListeners:   make(map[uint64]TopicListener),
+		defaultTimeout:       time.Second * 5,
 	}
 	this.ClientServer = NewClientServer()
 
@@ -1239,6 +1234,10 @@ func NewClient() *Client {
 	}
 
 	return this
+}
+
+func (this *Client) SetDefaultTimeout(timeout time.Duration) {
+	this.defaultTimeout = timeout
 }
 
 // AddSendListener adds a listener on send messages (Publis/Push/RequestAll/Request)
@@ -1350,13 +1349,13 @@ func (this *Client) handshake(c net.Conn) error {
 	}
 	this.muhnd.RUnlock()
 
-	err := serializeHanshake(c, this.wire.codec, this.timeout, this.uuid, payload)
+	err := serializeHanshake(c, this.wire.codec, time.Second, this.uuid, payload)
 	if err != nil {
 		return err
 	}
 
 	// get reply
-	uuid, group, remoteTopics, err := deserializeHandshake(c, this.wire.codec, this.timeout)
+	uuid, group, remoteTopics, err := deserializeHandshake(c, this.wire.codec, time.Second)
 	if err != nil {
 		return err
 	}
@@ -1564,7 +1563,7 @@ func (this *Client) Handle(name string, middlewares ...interface{}) {
 	defer this.muconn.Unlock()
 
 	if this.wire.conn != nil {
-		msg, _ := createEnvelope(SUB, name, nil, nil, this.timeout, this.wire.codec)
+		msg, _ := createEnvelope(SUB, name, nil, nil, time.Second, this.wire.codec)
 		this.wire.Send(msg)
 	}
 }
@@ -1576,14 +1575,14 @@ func (this *Client) Cancel(name string) {
 	defer this.muconn.Unlock()
 
 	if this.wire.conn != nil {
-		msg, _ := createEnvelope(UNSUB, name, nil, nil, this.timeout, this.wire.codec)
+		msg, _ := createEnvelope(UNSUB, name, nil, nil, time.Second, this.wire.codec)
 		this.wire.Send(msg)
 	}
 }
 
 // Request sends a message and waits for the reply
 func (this *Client) Request(name string, payload interface{}, handler interface{}) <-chan error {
-	return this.RequestTimeout(name, payload, handler, this.timeout)
+	return this.RequestTimeout(name, payload, handler, this.defaultTimeout)
 }
 
 // RequestTimeout is the same as Request with a timeout definition
@@ -1593,7 +1592,7 @@ func (this *Client) RequestTimeout(name string, payload interface{}, handler int
 
 // RequestAll requests messages to all connected clients of the same server. If a client is not connected it is forever lost.
 func (this *Client) RequestAll(name string, payload interface{}, handler interface{}) <-chan error {
-	return this.Send(REQALL, name, payload, handler, this.timeout)
+	return this.Send(REQALL, name, payload, handler, this.defaultTimeout)
 }
 
 // RequestAllTimeout requests messages to all connected clients of the same server. If a client is not connected it is forever lost.
@@ -1603,7 +1602,7 @@ func (this *Client) RequestAllTimeout(name string, payload interface{}, handler 
 
 // Push sends a message and receive an acknowledge
 func (this *Client) Push(name string, m interface{}) <-chan error {
-	return this.PushTimeout(name, m, this.timeout)
+	return this.PushTimeout(name, m, this.defaultTimeout)
 }
 
 // PushTimeout  is the same as Push with a timeout definition
@@ -1613,7 +1612,7 @@ func (this *Client) PushTimeout(name string, m interface{}, timeout time.Duratio
 
 // Publish sends a message without any reply
 func (this *Client) Publish(name string, m interface{}) <-chan error {
-	return this.PublishTimeout(name, m, this.timeout)
+	return this.PublishTimeout(name, m, this.defaultTimeout)
 }
 
 // If the type of the payload is *mybus.Msg
@@ -1654,6 +1653,7 @@ type Wires struct {
 	loadBalancer       LoadBalancer
 	rateLimiterFactory func() toolkit.Rate
 	bufferSize         int
+	defaultTimeout     time.Duration
 }
 
 type SendListener func(event SendEvent)
@@ -1684,7 +1684,12 @@ func NewWires(codec Codec) *Wires {
 		dropTopicListeners: make(map[uint64]TopicListener),
 		loadBalancer:       NewSimpleLB(),
 		bufferSize:         1000,
+		defaultTimeout:     time.Second * 5,
 	}
+}
+
+func (this *Wires) SetDefaultTimeout(timeout time.Duration) {
+	this.defaultTimeout = timeout
 }
 
 // AddSendListener adds a listener on send messages (Publis/Push/RequestAll/Request)
@@ -1935,7 +1940,12 @@ func (this *Wires) RequestTimeout(name string, payload interface{}, handler inte
 }
 
 // RequestAll requests messages to all connected clients. If a client is not connected it is forever lost.
-func (this *Wires) RequestAll(name string, payload interface{}, handler interface{}, timeout time.Duration) <-chan error {
+func (this *Wires) RequestAll(name string, payload interface{}, handler interface{}) <-chan error {
+	return this.Send(REQALL, name, payload, handler, this.defaultTimeout)
+}
+
+// RequestAll requests messages to all connected clients. If a client is not connected it is forever lost.
+func (this *Wires) RequestAllTimeout(name string, payload interface{}, handler interface{}, timeout time.Duration) <-chan error {
 	return this.Send(REQALL, name, payload, handler, timeout)
 }
 
@@ -1943,6 +1953,10 @@ func (this *Wires) RequestAll(name string, payload interface{}, handler interfac
 // If the type of the payload is *mybus.Msg
 // it will ignore encoding and use the internal bytes as the payload.
 func (this *Wires) Push(name string, payload interface{}) <-chan error {
+	return this.Send(PUSH, name, payload, nil, this.defaultTimeout)
+}
+
+func (this *Wires) PushTimeout(name string, payload interface{}, timeout time.Duration) <-chan error {
 	return this.Send(PUSH, name, payload, nil, time.Second)
 }
 
@@ -1950,7 +1964,11 @@ func (this *Wires) Push(name string, payload interface{}) <-chan error {
 // If the type of the payload is *mybus.Msg
 // it will ignore encoding and use the internal bytes as the payload.
 func (this *Wires) Publish(name string, payload interface{}) <-chan error {
-	return this.Send(PUB, name, payload, nil, time.Second)
+	return this.Send(PUB, name, payload, nil, this.defaultTimeout)
+}
+
+func (this *Wires) PublishTimeout(name string, payload interface{}, timeout time.Duration) <-chan error {
+	return this.Send(PUB, name, payload, nil, timeout)
 }
 
 // Send is the generic function to send messages
@@ -1994,7 +2012,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 		return errch
 	}
 
-	err = UnknownTopic(faults.New(UNKNOWNTOPIC, msg.name))
+	err = UnknownTopic(fmt.Errorf(UNKNOWNTOPIC, msg.name))
 	if msg.kind == PUSH || msg.kind == REQ {
 		go func() {
 			this.RLock()
@@ -2133,19 +2151,42 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 	return errch
 }
 
+type BindListener func(net.Listener)
+
 type Server struct {
 	ClientServer
 	*Wires
 
-	listener net.Listener
-	OnBind   func(net.Listener)
+	listener      net.Listener
+	bindListeners map[uint64]BindListener
+	listenersIdx  uint64
 }
 
 func NewServer() *Server {
-	server := new(Server)
+	server := &Server{
+		bindListeners: make(map[uint64]BindListener),
+	}
 	server.Wires = NewWires(JsonCodec{})
 	server.ClientServer = NewClientServer()
 	return server
+}
+
+func (this *Server) AddBindListeners(listener BindListener) uint64 {
+	var idx = atomic.AddUint64(&this.listenersIdx, 1)
+	this.bindListeners[idx] = listener
+	return idx
+
+}
+
+// RemoveBindListener removes a previously added listener on send messages
+func (this *Server) RemoveBindListener(idx uint64) {
+	delete(this.bindListeners, idx)
+}
+
+func (this *Server) fireBindListeners(event net.Listener) {
+	for _, listener := range this.bindListeners {
+		listener(event)
+	}
 }
 
 // BindAddress returns the listener address
@@ -2168,16 +2209,16 @@ func (this *Server) Listener() net.Listener {
 	return this.listener
 }
 
-func (this *Server) Listen(service string) error {
+func (this *Server) Listen(service string) <-chan error {
+	var cherr = make(chan error, 1)
 	// listen all interfaces
 	l, err := net.Listen("tcp", service)
 	if err != nil {
-		return err
+		cherr <- err
+		return cherr
 	}
 	this.listener = l
-	if this.OnBind != nil {
-		this.OnBind(l)
-	}
+	this.fireBindListeners(l)
 	logger.Tracef("[Listen] listening at %s", l.Addr())
 	go func() {
 		for {
@@ -2186,6 +2227,7 @@ func (this *Server) Listen(service string) error {
 			if err != nil {
 				// happens when the listener is closed
 				logger.Debugf("[Listen] Stoped listening at %s", l.Addr())
+				cherr <- err
 				return
 			}
 			wire := NewWire(this.codec)
@@ -2196,8 +2238,8 @@ func (this *Server) Listen(service string) error {
 			logger.Tracef("[Listen] %s: accepted connection from %s", l.Addr(), c.RemoteAddr())
 
 			if err != nil {
+				logger.Errorf("Failed to handshake. Rejecting connection: %s", err)
 				c.Close()
-				logger.Errorf("Failed to handshake: %s", err)
 			} else {
 				wire.remoteGroupID = group
 				wire.remoteTopics = remoteTopics
@@ -2233,7 +2275,7 @@ func (this *Server) Listen(service string) error {
 		}
 	}()
 
-	return nil
+	return cherr
 }
 
 func (this *Server) Port() int {
@@ -2242,7 +2284,7 @@ func (this *Server) Port() int {
 
 func (this *Server) handshake(c net.Conn, wire *Wire) (string, map[string]bool, error) {
 	// get remote topics
-	uuid, group, payload, err := deserializeHandshake(c, wire.codec, this.timeout)
+	uuid, group, payload, err := deserializeHandshake(c, wire.codec, time.Second)
 	if err != nil {
 		return "", nil, err
 	}
@@ -2261,7 +2303,7 @@ func (this *Server) handshake(c net.Conn, wire *Wire) (string, map[string]bool, 
 	}
 	this.muhnd.RUnlock()
 
-	err = serializeHanshake(c, wire.codec, this.timeout, this.uuid, topics)
+	err = serializeHanshake(c, wire.codec, time.Second, this.uuid, topics)
 	if err != nil {
 		return "", nil, err
 	}
@@ -2300,6 +2342,8 @@ func (this *Server) Destroy() {
 		this.listener.Close()
 	}
 	this.listener = nil
+	this.bindListeners = make(map[uint64]BindListener)
+	this.listenersIdx = 0
 }
 
 // Handle defines the function that will handle messages for a topic.
@@ -2317,7 +2361,7 @@ func (this *Server) Handle(name string, middlewares ...interface{}) {
 	}
 	this.addHandler(name, hnds)
 
-	msg, _ := createEnvelope(SUB, name, nil, nil, this.timeout, this.codec)
+	msg, _ := createEnvelope(SUB, name, nil, nil, time.Second, this.codec)
 	var ws = this.Wires.GetAll()
 	for _, w := range ws {
 		w.Send(msg)
@@ -2368,7 +2412,7 @@ func (this *Server) Route(name string, timeout time.Duration, before func(x *Req
 func (this *Server) Cancel(name string) {
 	this.removeHandler(name)
 
-	msg, _ := createEnvelope(UNSUB, name, nil, nil, this.timeout, this.codec)
+	msg, _ := createEnvelope(UNSUB, name, nil, nil, time.Second, this.codec)
 	var ws = this.Wires.GetAll()
 	for _, w := range ws {
 		w.Send(msg)

@@ -1552,6 +1552,8 @@ func (this *Client) Conn() net.Conn {
 // When handling Request/RequestAll messages, if a return is not specified,
 // the caller will not receive a reply until you explicitly call gomsg.Request.ReplyAs()
 func (this *Client) Handle(name string, middlewares ...interface{}) {
+	logger.Infof("[Client] Registering handler for %s", name)
+
 	var size = len(middlewares)
 	var hnds = make([]Middleware, size)
 	for i := 0; i < size; i++ {
@@ -2354,6 +2356,7 @@ func (this *Server) Destroy() {
 // When handling Request/RequestAll messages, if a return is not specified,
 // the caller will not receive a reply until you explicitly call gomsg.Request.ReplyAs()
 func (this *Server) Handle(name string, middlewares ...interface{}) {
+	logger.Infof("[Server] Registering handler for %s", name)
 	var size = len(middlewares)
 	var hnds = make([]Middleware, size)
 	for i := 0; i < size; i++ {

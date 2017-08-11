@@ -1,8 +1,8 @@
 package gomsg
 
 import (
+	"crypto/rand"
 	"errors"
-	"math/rand"
 	"net"
 	"sync"
 	"time"

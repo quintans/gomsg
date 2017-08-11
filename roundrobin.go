@@ -48,22 +48,21 @@ func (lb RoundRobinLB) Prepare(w *Wire, msg Envelope) {
 	atomic.AddUint64(&lb.counter, 1)
 }
 
-func (lb RoundRobinLB) Success(w *Wire, msg Envelope) {
-}
+func (lb RoundRobinLB) Done(w *Wire, msg Envelope, err error) {
+	if err != nil {
+		var load *Quarentine
+		if w.load == nil {
+			load = new(Quarentine)
+			w.load = load
+		} else {
+			load = w.load.(*Quarentine)
+		}
+		load.until = time.Now().Add(lb.quarantine)
 
-func (lb RoundRobinLB) Failure(w *Wire, msg Envelope, err error) {
-	var load *Quarentine
-	if w.load == nil {
-		load = new(Quarentine)
-		w.load = load
-	} else {
-		load = w.load.(*Quarentine)
+		lb.Lock()
+		defer lb.Unlock()
+		lb.Unstick(w)
 	}
-	load.until = time.Now().Add(lb.quarantine)
-
-	lb.Lock()
-	defer lb.Unlock()
-	lb.Unstick(w)
 }
 
 // Balance

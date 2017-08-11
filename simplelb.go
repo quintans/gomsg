@@ -57,21 +57,20 @@ func (lb SimpleLB) Prepare(w *Wire, msg Envelope) {
 	atomic.AddUint64(&load.value, 1)
 }
 
-func (lb SimpleLB) Success(w *Wire, msg Envelope) {
+func (lb SimpleLB) Done(w *Wire, msg Envelope, err error) {
 	var load = w.load.(*Load)
-	load.failures = 0
-}
+	if err == nil {
+		load.failures = 0
+	} else {
+		load.failures++
+		if load.failures >= lb.maxFailures {
+			load.quarantineUntil = time.Now().Add(lb.quarantine)
+		}
 
-func (lb SimpleLB) Failure(w *Wire, msg Envelope, err error) {
-	var load = w.load.(*Load)
-	load.failures++
-	if load.failures >= lb.maxFailures {
-		load.quarantineUntil = time.Now().Add(lb.quarantine)
+		lb.Lock()
+		defer lb.Unlock()
+		lb.Unstick(w)
 	}
-
-	lb.Lock()
-	defer lb.Unlock()
-	lb.Unstick(w)
 }
 
 // Balance

@@ -2024,12 +2024,10 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 				var w = this.loadBalancer.Next(name, wires)
 				// REQ can also receive multiple messages from ONE replier
 				err = <-this.send(w, msg)
+				this.loadBalancer.Done(w, msg, err)
 				// exit on success
 				if err == nil {
-					this.loadBalancer.Success(w, msg)
 					break
-				} else {
-					this.loadBalancer.Failure(w, msg, err)
 				}
 			}
 			errch <- err
@@ -2040,11 +2038,9 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 				if id == noGROUP {
 					for _, w := range wiresTriage(name, group, skipWire) {
 						e := <-this.send(w, msg)
+						this.loadBalancer.Done(w, msg, e)
 						if e == nil {
-							this.loadBalancer.Success(w, msg)
 							err = nil
-						} else {
-							this.loadBalancer.Failure(w, msg, e)
 						}
 					}
 				} else {
@@ -2054,13 +2050,11 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 						for i := 0; i < size; i++ {
 							var w = this.loadBalancer.Next(name, ws)
 							e := <-this.send(w, msg)
+							this.loadBalancer.Done(w, msg, e)
 							// send only to one.
 							// stop if there was a success.
 							if e == nil {
-								this.loadBalancer.Success(w, msg)
 								break
-							} else {
-								this.loadBalancer.Failure(w, msg, e)
 							}
 						}
 					}(group)
@@ -2102,11 +2096,10 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 					go func() {
 						// waits for the request completion
 						e := <-ch
+						this.loadBalancer.Done(w, msg, e)
 						if e == nil {
-							this.loadBalancer.Success(w, msg)
 							err = nil // at least one got through
 						} else {
-							this.loadBalancer.Failure(w, msg, e)
 							logger.Errorf("Failed requesting all: %s", e)
 						}
 						wg.Done()
@@ -2125,12 +2118,10 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 						e := <-this.send(w, msg)
 						// send only to one.
 						// stop if there was a success.
+						this.loadBalancer.Done(w, msg, e)
 						if e == nil {
-							this.loadBalancer.Success(w, msg)
 							err = nil
 							break
-						} else {
-							this.loadBalancer.Failure(w, msg, e)
 						}
 					}
 					wg.Done()
@@ -2506,10 +2497,8 @@ type LoadBalancer interface {
 	Remove(*Wire)
 	// Prepare is called before the message is sent
 	Prepare(*Wire, Envelope)
-	// Success is called when the message is sent successfuly
-	Success(*Wire, Envelope)
-	// Failure is called when a call fails
-	Failure(*Wire, Envelope, error)
+	// Complete is called when we are done with the wire
+	Done(*Wire, Envelope, error)
 	//
 	Next(string, []*Wire) *Wire
 }

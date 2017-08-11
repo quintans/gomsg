@@ -785,7 +785,7 @@ loop:
 				if this.codec != nil {
 					var e = this.codec.Decode(data, &s)
 					if e != nil {
-						logger.Errorf("[reader] Unable to decode %s; cause=%s", data, e)
+						logger.Errorf("Unable to decode %s; cause=%s", data, e)
 						s = fmt.Sprintf("Unable to decode %s; cause=%s", data, e)
 					}
 					data = []byte(s)
@@ -964,7 +964,7 @@ func CreateResponseHandler(codec Codec, fun interface{}) func(Response) {
 				p = reflect.New(payloadType)
 				var e = codec.Decode(ctx.reply, p.Interface())
 				if e != nil {
-					logger.Errorf("[CreateResponseHandler] Unable to decode %s; cause=%s", ctx.reply, e)
+					logger.Errorf("Unable to decode %s; cause=%s", ctx.reply, e)
 					ctx.fault = e
 				}
 				params = append(params, p.Elem())
@@ -1039,8 +1039,7 @@ func CreateRequestHandler(codec Codec, fun interface{}) func(*Request) {
 				p = reflect.New(payloadType)
 				var e = codec.Decode(req.payload, p.Interface())
 				if e != nil {
-					//panic(fmt.Sprintf("[createRequestHandler] Unable to decode %s; cause=%s", req.payload, e))
-					logger.Errorf("[createRequestHandler] Unable to decode %s; cause=%s", req.payload, e)
+					logger.Errorf("Unable to decode %s; cause=%s", req.payload, e)
 					req.SetFault(e)
 					return
 				}
@@ -1426,7 +1425,7 @@ func deserializeHandshake(c net.Conn, codec Codec, timeout time.Duration) ([]byt
 	if codec != nil {
 		var e = codec.Decode(data, &topics)
 		if e != nil {
-			panic(fmt.Sprintf("[deserializeHandshake] Unable to decode %s; cause=%s", data, e))
+			panic(fmt.Sprintf("Unable to decode %s; cause=%s", data, e))
 		}
 
 	} else {
@@ -1501,9 +1500,9 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 		// gets the connection
 		c, err = net.DialTimeout("tcp", this.addr, time.Second)
 		if err != nil {
-			logger.Tracef("[dial] %s: failed to connect to %s", this.Name, this.addr)
+			logger.Tracef("%s: failed to connect to %s", this.Name, this.addr)
 			if this.reconnectInterval > 0 {
-				logger.Tracef("[dial] %s: retry connecting to %s in %v", this.Name, this.addr, retry)
+				logger.Tracef("%s: retry connecting to %s in %v", this.Name, this.addr, retry)
 				time.Sleep(retry)
 				if this.reconnectMaxInterval > 0 && retry < this.reconnectMaxInterval {
 					retry = retry * 2
@@ -1512,7 +1511,7 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 					}
 				}
 			} else {
-				logger.Tracef("[dial] %X: NO retry will be performed to %s!", this.uuid, this.addr)
+				logger.Tracef("%X: NO retry will be performed to %s!", this.uuid, this.addr)
 				return
 			}
 		} else {
@@ -1520,7 +1519,7 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 		}
 	}
 
-	logger.Tracef("[dial] %s: connected to %s", c.LocalAddr(), this.addr)
+	logger.Tracef("%s: connected to %s", c.LocalAddr(), this.addr)
 
 	this.muconn.Lock()
 	defer this.muconn.Unlock()
@@ -1528,7 +1527,7 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 	// topic exchange
 	err = this.handshake(c)
 	if err != nil {
-		logger.Errorf("[dial] %s: error while handshaking %s: %s", c.LocalAddr(), this.addr, err)
+		logger.Errorf("%s: error while handshaking %s: %s", c.LocalAddr(), this.addr, err)
 		this.wire.SetConn(nil)
 		c.Close()
 	} else {
@@ -1552,7 +1551,7 @@ func (this *Client) Conn() net.Conn {
 // When handling Request/RequestAll messages, if a return is not specified,
 // the caller will not receive a reply until you explicitly call gomsg.Request.ReplyAs()
 func (this *Client) Handle(name string, middlewares ...interface{}) {
-	logger.Infof("[Client] Registering handler for %s", name)
+	logger.Infof("Registering handler for %s", name)
 
 	var size = len(middlewares)
 	var hnds = make([]Middleware, size)
@@ -2097,7 +2096,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 			if id == noGROUP {
 				for _, w := range wiresTriage(name, group, skipWire) {
 					// increment reply counter
-					logger.Tracef("[SendSkip] sending message to %s (ungrouped)", w.Conn().RemoteAddr())
+					logger.Tracef("sending message to %s (ungrouped)", w.Conn().RemoteAddr())
 					wg.Add(1)
 					ch := this.send(w, msg)
 					go func() {
@@ -2108,7 +2107,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 							err = nil // at least one got through
 						} else {
 							this.loadBalancer.Failure(w, msg, e)
-							logger.Errorf("[SendSkip] %s", e)
+							logger.Errorf("Failed requesting all: %s", e)
 						}
 						wg.Done()
 					}()
@@ -2121,7 +2120,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 					var size = len(ws)
 					for i := 0; i < size; i++ {
 						var w = this.loadBalancer.Next(name, ws)
-						logger.Tracef("[SendSkip] sending message to %s (group %s)", w.Conn().RemoteAddr(), id)
+						logger.Tracef("sending message to %s (group %s)", w.Conn().RemoteAddr(), id)
 						// waits for the request completion
 						e := <-this.send(w, msg)
 						// send only to one.
@@ -2141,7 +2140,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 		go func() {
 			// Wait for all requests to complete.
 			wg.Wait()
-			logger.Tracef("[SendSkip] all requests finnished")
+			logger.Tracef("all requests finnished")
 			// pass the end mark
 			if handler != nil {
 				handler(NewResponse(skipWire, nil, ACK, 0, nil))
@@ -2221,14 +2220,14 @@ func (this *Server) Listen(service string) <-chan error {
 	}
 	this.listener = l
 	this.fireBindListeners(l)
-	logger.Tracef("[Listen] listening at %s", l.Addr())
+	logger.Tracef("listening at %s", l.Addr())
 	go func() {
 		for {
 			// notice that c is changed in the disconnect function
 			c, err := l.Accept()
 			if err != nil {
 				// happens when the listener is closed
-				logger.Debugf("[Listen] Stoped listening at %s", l.Addr())
+				logger.Debugf("Stoped listening at %s", l.Addr())
 				cherr <- err
 				return
 			}
@@ -2237,7 +2236,7 @@ func (this *Server) Listen(service string) <-chan error {
 
 			// topic exchange
 			group, remoteTopics, err := this.handshake(c, wire)
-			logger.Tracef("[Listen] %s: accepted connection from %s", l.Addr(), c.RemoteAddr())
+			logger.Tracef("%s: accepted connection from %s", l.Addr(), c.RemoteAddr())
 
 			if err != nil {
 				logger.Errorf("Failed to handshake. Rejecting connection: %s", err)
@@ -2253,9 +2252,9 @@ func (this *Server) Listen(service string) <-chan error {
 					if c == conn {
 						// handle errors during a connection
 						if faults.Has(e, io.EOF) || isClosed(e) {
-							logger.Debugf("[wire.disconnected] client %s - closed connection", conn.RemoteAddr())
+							logger.Debugf("client %s - closed connection", conn.RemoteAddr())
 						} else if e != nil {
-							logger.Errorf("[wire.disconnected] client %s droped with error: %s", conn.RemoteAddr(), faults.Wrap(e))
+							logger.Errorf("Client %s droped with error: %s", conn.RemoteAddr(), faults.Wrap(e))
 						}
 
 						this.Wires.Kill(conn)
@@ -2356,7 +2355,7 @@ func (this *Server) Destroy() {
 // When handling Request/RequestAll messages, if a return is not specified,
 // the caller will not receive a reply until you explicitly call gomsg.Request.ReplyAs()
 func (this *Server) Handle(name string, middlewares ...interface{}) {
-	logger.Infof("[Server] Registering handler for %s", name)
+	logger.Infof("Registering handler for %s", name)
 	var size = len(middlewares)
 	var hnds = make([]Middleware, size)
 	for i := 0; i < size; i++ {

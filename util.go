@@ -1,17 +1,17 @@
 package gomsg
 
 import (
-	"crypto/rand"
-	"errors"
 	"net"
 	"sync"
 	"time"
+
+	"github.com/quintans/toolkit/faults"
 )
 
 func IP() (string, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		return "", err
+		return "", faults.Wrap(err)
 	}
 	for _, iface := range ifaces {
 		if iface.Flags&net.FlagUp == 0 {
@@ -22,7 +22,7 @@ func IP() (string, error) {
 		}
 		addrs, err := iface.Addrs()
 		if err != nil {
-			return "", err
+			return "", faults.Wrap(err)
 		}
 		for _, addr := range addrs {
 			var ip net.IP
@@ -42,7 +42,7 @@ func IP() (string, error) {
 			return ip.String(), nil
 		}
 	}
-	return "", errors.New("are you connected to the network?")
+	return "", faults.New("Are you connected to the network?")
 }
 
 type Looper struct {
@@ -186,10 +186,4 @@ func (kv *KeyValue) Delete(key interface{}) interface{} {
 		}
 	}
 	return nil
-}
-
-func NewUUID() []byte {
-	var b = make([]byte, 16)
-	rand.Read(b)
-	return b
 }

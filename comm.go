@@ -44,7 +44,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/quintans/toolkit"
+	tk "github.com/quintans/toolkit"
 	"github.com/quintans/toolkit/faults"
 )
 
@@ -100,10 +100,9 @@ var (
 
 // errors
 var (
-	NOCODEC    = errors.New("No codec defined")
-	EOR        = errors.New("End Of Multiple Reply")
-	NACKERROR  = errors.New("Not Acknowledge Error")
-	CLOSEDWIRE = errors.New("Closed Wire")
+	NOCODEC   = errors.New("No codec defined")
+	EOR       = errors.New("End Of Multiple Reply")
+	NACKERROR = errors.New("Not Acknowledge Error")
 
 	UNKNOWNTOPIC = "No registered subscriber for %s."
 	TIMEOUT      = "Timeout (%s) while waiting for reply of call #%d %s(%s)=%s"
@@ -112,6 +111,7 @@ var (
 // Specific error types are define so that we can use type assertion, if needed
 type UnknownTopic error
 type TimeoutError error
+type SystemError error
 
 func timeouttime(timeout time.Duration) time.Time {
 	if timeout == time.Duration(0) {
@@ -369,7 +369,7 @@ type Wire struct {
 	// load can be anything defined by the loadbalancer
 	load interface{}
 
-	rateLimiter toolkit.Rate
+	rateLimiter tk.Rate
 	bufferSize  int
 }
 
@@ -389,7 +389,7 @@ func (this *Wire) SetBufferSize(size int) {
 	this.bufferSize = size
 }
 
-func (this *Wire) SetRateLimiter(limiter toolkit.Rate) {
+func (this *Wire) SetRateLimiter(limiter tk.Rate) {
 	this.rateLimiter = limiter
 }
 
@@ -488,7 +488,7 @@ func (this *Wire) asynchWaitForCallback(msg Envelope) chan *Response {
 			case <-time.After(msg.timeout):
 				this.delCallback(msg.sequence)
 				msg.errch <- TimeoutError(faults.New(TIMEOUT, msg.timeout, msg.sequence, msg.kind, msg.name, msg.payload))
-				logger.Infof("Timeout for: %s", msg)
+				//logger.Infof("Timeout for: %s", msg)
 				return
 
 			case r := <-ch:
@@ -585,8 +585,7 @@ func (this *Wire) enqueue(msg Envelope) {
 	if this.chin != nil {
 		this.chin <- msg
 	} else {
-		logger.Errorf("Closed connection. Unable to send %s", msg)
-		msg.errch <- CLOSEDWIRE
+		msg.errch <- SystemError(faults.New("Closed connection. Unable to send %s", msg))
 	}
 }
 
@@ -630,11 +629,10 @@ func (this *Wire) writer(c net.Conn, chin chan Envelope) {
 		}
 		var err = this.write(c, msg)
 		if err != nil {
-			logger.Errorf("Error while writing to %s", c.RemoteAddr())
 			if ch != nil {
 				ch <- nil // stop waiting for calback
 			}
-			msg.errch <- err
+			msg.errch <- faults.Wrapf(err, "Error while writing to %s", c.RemoteAddr())
 		} else if ch == nil {
 			msg.errch <- nil
 		}
@@ -785,8 +783,8 @@ loop:
 				if this.codec != nil {
 					var e = this.codec.Decode(data, &s)
 					if e != nil {
-						logger.Errorf("Unable to decode %s; cause=%s", data, e)
-						s = fmt.Sprintf("Unable to decode %s; cause=%s", data, e)
+						logger.Errorf("Unable to decode %s\n%+v", data, faults.Wrap(e))
+						s = fmt.Sprintf("Unable to decode %s; cause=%v", data, e)
 					}
 					data = []byte(s)
 				}
@@ -964,8 +962,7 @@ func CreateResponseHandler(codec Codec, fun interface{}) func(Response) {
 				p = reflect.New(payloadType)
 				var e = codec.Decode(ctx.reply, p.Interface())
 				if e != nil {
-					logger.Errorf("Unable to decode %s; cause=%s", ctx.reply, e)
-					ctx.fault = e
+					ctx.fault = faults.Wrapf(e, "Unable to decode %s", ctx.reply)
 				}
 				params = append(params, p.Elem())
 
@@ -1039,8 +1036,7 @@ func CreateRequestHandler(codec Codec, fun interface{}) func(*Request) {
 				p = reflect.New(payloadType)
 				var e = codec.Decode(req.payload, p.Interface())
 				if e != nil {
-					logger.Errorf("Unable to decode %s; cause=%s", req.payload, e)
-					req.SetFault(e)
+					req.SetFault(faults.Wrapf(e, "Unable to decode payload %s", req.payload))
 					return
 				}
 				params = append(params, p.Elem())
@@ -1072,6 +1068,7 @@ func CreateRequestHandler(codec Codec, fun interface{}) func(*Request) {
 					if codec != nil {
 						result, err = codec.Encode(data)
 						if err != nil {
+							err = faults.Wrap(err)
 							break
 						}
 					} else {
@@ -1107,7 +1104,7 @@ type ClientServer struct {
 }
 
 func NewClientServer() ClientServer {
-	var uuid = NewUUID()
+	var uuid = tk.NewUUID()
 	return ClientServer{
 		handlers: make([]handler, 0),
 		uuid:     uuid,
@@ -1172,7 +1169,7 @@ func createEnvelope(kind EKind, name string, payload interface{}, success interf
 			var err error
 			msg.payload, err = codec.Encode(payload)
 			if err != nil {
-				return Envelope{}, err
+				return Envelope{}, faults.Wrap(err)
 			}
 		}
 	}
@@ -1310,7 +1307,7 @@ func (this *Client) SetBufferSize(size int) {
 	this.wire.bufferSize = size
 }
 
-func (this *Client) SetRateLimiter(limiter toolkit.Rate) {
+func (this *Client) SetRateLimiter(limiter tk.Rate) {
 	this.wire.SetRateLimiter(limiter)
 }
 
@@ -1382,9 +1379,9 @@ func serializeHanshake(c net.Conn, codec Codec, timeout time.Duration, uuid []by
 	} else {
 		var buf = new(bytes.Buffer)
 		os := NewOutputStream(buf)
-		os.WriteUI16(uint16(len(payload)))
+		err = os.WriteUI16(uint16(len(payload)))
 		if err != nil {
-			return faults.Wrap(err)
+			return err
 		}
 		for _, v := range payload {
 			os.WriteString(v)
@@ -1399,7 +1396,7 @@ func serializeHanshake(c net.Conn, codec Codec, timeout time.Duration, uuid []by
 	// uuid
 	_, err = os.writer.Write(uuid)
 	if err != nil {
-		return err
+		return faults.Wrap(err)
 	}
 	err = os.WriteBytes(data)
 	if err != nil {
@@ -1527,7 +1524,7 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 	// topic exchange
 	err = this.handshake(c)
 	if err != nil {
-		logger.Errorf("%s: error while handshaking %s: %s", c.LocalAddr(), this.addr, err)
+		logger.Errorf("%s: error while handshaking %s: %+v", c.LocalAddr(), this.addr, err)
 		this.wire.SetConn(nil)
 		c.Close()
 	} else {
@@ -1652,7 +1649,7 @@ type Wires struct {
 	dropTopicListeners map[uint64]TopicListener
 	listenersIdx       uint64
 	loadBalancer       LoadBalancer
-	rateLimiterFactory func() toolkit.Rate
+	rateLimiterFactory func() tk.Rate
 	bufferSize         int
 	defaultTimeout     time.Duration
 }
@@ -1761,7 +1758,7 @@ func (this *Wires) SetBufferSize(size int) {
 	this.bufferSize = size
 }
 
-func (this *Wires) SetRateLimiterFactory(factory func() toolkit.Rate) {
+func (this *Wires) SetRateLimiterFactory(factory func() tk.Rate) {
 	this.rateLimiterFactory = factory
 }
 
@@ -2100,7 +2097,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 						if e == nil {
 							err = nil // at least one got through
 						} else {
-							logger.Errorf("Failed requesting all: %s", e)
+							logger.Errorf("Failed requesting all: %+v", e)
 						}
 						wg.Done()
 					}()
@@ -2193,7 +2190,7 @@ func (this *Server) SetBufferSize(size int) {
 	this.Wires.SetBufferSize(size)
 }
 
-func (this *Server) SetRateLimiterFactory(factory func() toolkit.Rate) {
+func (this *Server) SetRateLimiterFactory(factory func() tk.Rate) {
 	this.Wires.SetRateLimiterFactory(factory)
 }
 
@@ -2206,7 +2203,7 @@ func (this *Server) Listen(service string) <-chan error {
 	// listen all interfaces
 	l, err := net.Listen("tcp", service)
 	if err != nil {
-		cherr <- err
+		cherr <- faults.Wrapf(err, "Unable to bind to %s", service)
 		return cherr
 	}
 	this.listener = l
@@ -2218,8 +2215,7 @@ func (this *Server) Listen(service string) <-chan error {
 			c, err := l.Accept()
 			if err != nil {
 				// happens when the listener is closed
-				logger.Debugf("Stoped listening at %s", l.Addr())
-				cherr <- err
+				cherr <- faults.Wrapf(err, "Stoped listening at %s", l.Addr())
 				return
 			}
 			wire := NewWire(this.codec)
@@ -2230,7 +2226,7 @@ func (this *Server) Listen(service string) <-chan error {
 			logger.Tracef("%s: accepted connection from %s", l.Addr(), c.RemoteAddr())
 
 			if err != nil {
-				logger.Errorf("Failed to handshake. Rejecting connection: %s", err)
+				logger.Errorf("Failed to handshake. Rejecting connection: %+v", err)
 				c.Close()
 			} else {
 				wire.remoteGroupID = group
@@ -2245,7 +2241,7 @@ func (this *Server) Listen(service string) <-chan error {
 						if faults.Has(e, io.EOF) || isClosed(e) {
 							logger.Debugf("client %s - closed connection", conn.RemoteAddr())
 						} else if e != nil {
-							logger.Errorf("Client %s droped with error: %s", conn.RemoteAddr(), faults.Wrap(e))
+							logger.Errorf("Client %s droped with error: %+v", conn.RemoteAddr(), faults.Wrap(e))
 						}
 
 						this.Wires.Kill(conn)

@@ -187,7 +187,7 @@ func main() {
 			str = "[END]"
 		}
 		fmt.Println("=====>", str)
-	}, time.Second)
+	})
 
 	//fmt.Println("====== Drop DIR #2 =======")
 	//dir2.Destroy() // removed from the cluster

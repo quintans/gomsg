@@ -7,12 +7,7 @@ import (
 	"time"
 
 	. "github.com/quintans/gomsg"
-	"github.com/quintans/toolkit/log"
 )
-
-func init() {
-	gomsg.SetLogger(log.LoggerFor("github.com/quintans/gmsg"))
-}
 
 const (
 	SERVER_PORT_1 = ":7777"
@@ -331,7 +326,7 @@ func TestRequestAllReply(t *testing.T) {
 		if ctx.Last() {
 			endMarker++
 		}
-	}, time.Second)
+	})
 
 	if err != nil {
 		t.Fatalf("Error: %s", err)
@@ -348,10 +343,11 @@ func TestRouteClients(t *testing.T) {
 	wait() // give time to the previous test to shutdown
 
 	server := NewServer()
-	server.Listen(SERVER_PORT_1)
 	defer server.Destroy()
 	// all (*) messages arriving to the server are routed to the clients
 	server.Route("*", time.Second, nil, nil)
+	server.Listen(SERVER_PORT_1)
+	wait()
 
 	cli1 := NewClient()
 	defer cli1.Destroy()
@@ -516,7 +512,7 @@ func TestRequestAllReplyHA(t *testing.T) {
 		if r == "HELLO" {
 			expected++
 		}
-	}, time.Second)
+	})
 
 	if err != nil {
 		t.Fatalf("Error: %s", err)
@@ -617,8 +613,9 @@ func TestMultiReply(t *testing.T) {
 	// all messages arriving to the server are routed to the clients
 	server := NewServer()
 	defer server.Destroy()
-	server.Listen(SERVER_PORT_1)
 	server.Route("*", time.Second, nil, nil)
+	server.Listen(SERVER_PORT_1)
+	wait()
 
 	cli := NewClient()
 	defer cli.Destroy()

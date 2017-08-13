@@ -5,12 +5,7 @@ import (
 	"time"
 
 	"github.com/quintans/gomsg"
-	"github.com/quintans/toolkit/log"
 )
-
-func init() {
-	gomsg.SetLogger(log.LoggerFor("github.com/quintans/gmsg"))
-}
 
 func main() {
 	server := gomsg.NewServer()
@@ -60,7 +55,7 @@ func main() {
 	// Warning: when requesting many in a server, the last response (end mark) will have a null connection
 	server.RequestAll("REVERSE", "hello", func(ctx gomsg.Response, r string) {
 		fmt.Println("===> reply:", r)
-	}, time.Second)
+	})
 	/*
 		server.Request("REVERSE", "hello", func(ctx gomsg.IResponse, r string) {
 			fmt.Println("===> reply:", r, "from", ctx.Connection().RemoteAddr())

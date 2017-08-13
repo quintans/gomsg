@@ -5,16 +5,11 @@ import (
 	"time"
 
 	"github.com/quintans/gomsg"
-	"github.com/quintans/toolkit/log"
 )
-
-func init() {
-	gomsg.SetLogger(log.LoggerFor("github.com/quintans/gmsg"))
-}
 
 func main() {
 	server := gomsg.NewServer()
-	server.SetTimeout(time.Second)
+	server.SetDefaultTimeout(time.Second)
 	server.Handle("PING", func() {})
 	server.AddNewTopicListener(func(event gomsg.TopicEvent) {
 		fmt.Printf("===> New topic %s at %s\n", event.Name, event.SourceAddr)

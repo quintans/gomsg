@@ -12,7 +12,6 @@ import (
 
 func init() {
 	log.Register("/", log.WARN).ShowCaller(true)
-	gomsg.SetLogger(log.LoggerFor("github.com/quintans/gmsg"))
 }
 
 const TOPIC = "ToPic"
@@ -21,8 +20,9 @@ func wait() {
 	time.Sleep(time.Millisecond * 10)
 }
 
-func createClient(reply string) *gomsg.Client {
+func createClient(reply string, l log.ILogger) *gomsg.Client {
 	var cli = gomsg.NewClient()
+	cli.SetLogger(l)
 	cli.Handle(TOPIC, func() string {
 		return reply
 	})
@@ -31,14 +31,16 @@ func createClient(reply string) *gomsg.Client {
 }
 
 func main() {
+	var l = log.LoggerFor("github.com/quintans/gmsg").SetCallerAt(2)
 	server := gomsg.NewServer()
-	server.SetTimeout(time.Second)
+	server.SetLogger(l)
+	server.SetDefaultTimeout(time.Second)
 	server.Listen(":7777")
 
-	createClient("One")
-	createClient("Two")
-	createClient("Three")
-	createClient("Four")
+	createClient("One", l)
+	createClient("Two", l)
+	createClient("Three", l)
+	createClient("Four", l)
 
 	var wg sync.WaitGroup
 	var now = time.Now()
@@ -57,7 +59,7 @@ func main() {
 					}
 					fmt.Println("=====>", str)
 				*/
-			}, time.Second)
+			})
 			wg.Done()
 		}()
 	}

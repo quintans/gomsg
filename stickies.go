@@ -30,11 +30,9 @@ func (st Stickies) findSticky(name string) *Sticky {
 	for s, v := range st {
 		if strings.HasSuffix(s, FILTER_TOKEN) {
 			if strings.HasPrefix(name, s[:len(s)-1]) {
-				logger.Debugf("Found sticky rule '%s' for '%s'", s, name)
 				return v
 			}
 		} else if name == s {
-			logger.Debugf("Found sticky rule '%s' for '%s'", s, name)
 			return v
 		}
 	}

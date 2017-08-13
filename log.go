@@ -1,16 +1,32 @@
 package gomsg
 
-type Logger interface {
-	Tracef(string, ...interface{})
-	Debugf(string, ...interface{})
-	Infof(string, ...interface{})
-	Warnf(string, ...interface{})
-	Errorf(string, ...interface{})
-	Fatalf(string, ...interface{})
+import (
+	"log"
+
+	l "github.com/quintans/toolkit/log"
+)
+
+type Log struct{}
+
+func (l Log) IsActive(level l.LogLevel) bool {
+	return true
 }
 
-var logger Logger
-
-func SetLogger(lgr Logger) {
-	logger = lgr
+func (l Log) Tracef(format string, args ...interface{}) {
+	log.Printf(format, args...)
+}
+func (l Log) Debugf(format string, args ...interface{}) {
+	log.Printf(format, args...)
+}
+func (l Log) Infof(format string, args ...interface{}) {
+	log.Printf(format, args...)
+}
+func (l Log) Warnf(format string, args ...interface{}) {
+	log.Printf(format, args...)
+}
+func (l Log) Errorf(format string, args ...interface{}) {
+	log.Printf(format, args...)
+}
+func (l Log) Fatalf(format string, args ...interface{}) {
+	log.Printf(format, args...)
 }

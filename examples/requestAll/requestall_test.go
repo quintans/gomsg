@@ -6,12 +6,7 @@ import (
 	"time"
 
 	"github.com/quintans/gomsg"
-	"github.com/quintans/toolkit/log"
 )
-
-func init() {
-	gomsg.SetLogger(log.LoggerFor("github.com/quintans/gmsg"))
-}
 
 func wait() {
 	time.Sleep(time.Millisecond * 20)
@@ -19,7 +14,7 @@ func wait() {
 
 func TestRequestAll(t *testing.T) {
 	server := gomsg.NewServer()
-	server.SetTimeout(time.Second)
+	server.SetDefaultTimeout(time.Second)
 	server.Listen(":7777")
 	wait()
 
@@ -46,7 +41,7 @@ func TestRequestAll(t *testing.T) {
 	server.RequestAll("REVERSE", "hello", func(ctx gomsg.Response, r string) {
 		srvcount++
 		fmt.Println("===> reply:", r, ", last?", ctx.Last())
-	}, time.Second)
+	})
 
 	wait()
 

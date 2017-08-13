@@ -6,12 +6,7 @@ import (
 	"time"
 
 	"github.com/quintans/gomsg"
-	"github.com/quintans/toolkit/log"
 )
-
-func init() {
-	gomsg.SetLogger(log.LoggerFor("github.com/quintans/gmsg"))
-}
 
 const (
 	CLEAN_CYCLE = time.Second
@@ -90,6 +85,6 @@ func main() {
 		fmt.Println("=[3]==HELLO===> reply:", r, e, "from", ctx.Connection().RemoteAddr())
 	})
 	if err != nil {
-		fmt.Println("Error on calling the second HELLO:", err)
+		fmt.Println("Expected error on calling the second HELLO:", err)
 	}
 }

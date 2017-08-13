@@ -6,16 +6,11 @@ import (
 	"time"
 
 	"github.com/quintans/gomsg"
-	"github.com/quintans/toolkit/log"
 )
-
-func init() {
-	gomsg.SetLogger(log.LoggerFor("github.com/quintans/gmsg"))
-}
 
 func TestStickyness(t *testing.T) {
 	server := gomsg.NewServer()
-	server.SetTimeout(time.Second)
+	server.SetDefaultTimeout(time.Second)
 	server.Listen(":7777")
 
 	cli := gomsg.NewClient()

@@ -27,7 +27,7 @@ func NewBStarClient(primary string, backup string) BStarClient {
 		client:  gomsg.NewClient().SetCodec(codec),
 		servers: []string{primary, backup},
 	}
-	this.client.SetTimeout(time.Second)
+	this.client.SetDefaultTimeout(time.Second)
 	this.client.Connect(primary)
 
 	return this

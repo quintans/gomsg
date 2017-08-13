@@ -5,17 +5,12 @@ import (
 	"time"
 
 	"github.com/quintans/gomsg"
-	"github.com/quintans/toolkit/log"
 )
 
 const (
 	MESSAGE = "World!"
 	REPLY   = "Hello World!"
 )
-
-func init() {
-	gomsg.SetLogger(log.LoggerFor("github.com/quintans/gmsg"))
-}
 
 func wait() {
 	time.Sleep(time.Millisecond * 10)
@@ -24,10 +19,10 @@ func wait() {
 func main() {
 	// routing requests between server 1 and server 2
 	server1 := gomsg.NewServer()
-	server1.SetTimeout(time.Second)
+	server1.SetDefaultTimeout(time.Second)
 	server1.Listen(":7777")
 	server2 := gomsg.NewServer()
-	server2.SetTimeout(time.Second)
+	server2.SetDefaultTimeout(time.Second)
 	server2.Listen(":7778")
 	wait()
 

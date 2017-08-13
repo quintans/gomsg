@@ -77,7 +77,7 @@ func NewDirectory(name string) *Directory {
 		PingFailures: 2,
 	}
 	dir.server = gomsg.NewServer()
-	dir.server.SetTimeout(time.Second * 5)
+	dir.server.SetDefaultTimeout(time.Second * 5)
 
 	dir.server.OnClose = func(c net.Conn) {
 
@@ -189,7 +189,7 @@ func (dir *Directory) Destroy() {
 
 // Listen starts Directory listening for incoming connections
 func (dir *Directory) Listen(addr string) error {
-	var err = dir.server.Listen(addr)
+	var err = <-dir.server.Listen(addr)
 	if err != nil {
 		return err
 	}
@@ -287,8 +287,8 @@ type Peer struct {
 func NewPeer(name string) *Peer {
 	node := &Peer{
 		name:         name,
-		Wires:        gomsg.NewWires(gomsg.JsonCodec{}),
-		dirs:         gomsg.NewWires(gomsg.JsonCodec{}),
+		Wires:        gomsg.NewWires(gomsg.JsonCodec{}, gomsg.Log{}),
+		dirs:         gomsg.NewWires(gomsg.JsonCodec{}, gomsg.Log{}),
 		peers:        make(map[string]*gomsg.Client),
 		PingInterval: time.Second,
 		PingFailures: 2,
@@ -333,7 +333,7 @@ func (node *Peer) addServiceProvider(service string, endpoint string) {
 // Connect binds a to a local address to provide services
 // and connect to the directory remove addresses
 func (node *Peer) Connect(bindAddr string, dirAddrs ...string) error {
-	var err = node.local.Listen(bindAddr)
+	var err = <-node.local.Listen(bindAddr)
 	if err != nil {
 		return err
 	}
@@ -468,19 +468,22 @@ func (node *Peer) connectPeer(peerAddr string) error {
 	if node.peers[peerAddr] == nil {
 		cli := gomsg.NewClient().SetCodec(node.Codec())
 
+		var debounce *toolkit.Debouncer
 		cli.OnConnect = func(w *gomsg.Wire) {
 			node.Add(w)
 			if node.idleTimeout > 0 {
 				// disconnect connections idle for more than one minute
-				var debounce = toolkit.NewDebounce(node.idleTimeout, func(o interface{}) {
+				debounce = toolkit.NewDebounce(node.idleTimeout, func(o interface{}) {
 					logger.Infof("Peer:Idle] %s: Closing idle connection to %s", node.name, peerAddr)
 					node.Kill(w.Conn())
 				})
-				w.AddSendListener(0, func(event gomsg.SendEvent) {
-					debounce.Delay(w.Conn())
-				})
 			}
 		}
+		cli.AddSendListener(func(event gomsg.SendEvent) {
+			if debounce != nil {
+				debounce.Delay(cli.Conn())
+			}
+		})
 		cli.OnClose = func(c net.Conn) {
 			node.Kill(c)
 
@@ -531,7 +534,7 @@ func (node *Peer) Handle(name string, fun interface{}) <-chan error {
 	node.mu.Unlock()
 
 	// notify service directory cluster of new handle
-	var errch = node.dirs.RequestAll(S_ADDSERVICE, name, nil, time.Second)
+	var errch = node.dirs.RequestAll(S_ADDSERVICE, name, nil)
 
 	return errch
 }
@@ -540,7 +543,7 @@ func (node *Peer) Handle(name string, fun interface{}) <-chan error {
 func (node *Peer) Cancel(name string) {
 	node.local.Cancel(name)
 	// notify service directory cluster of cancel handle
-	node.dirs.RequestAll(S_CANCELSERVICE, name, nil, time.Second)
+	node.dirs.RequestAll(S_CANCELSERVICE, name, nil)
 
 	node.mu.Lock()
 	delete(node.services, name)

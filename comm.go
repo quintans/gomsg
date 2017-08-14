@@ -34,6 +34,7 @@ package gomsg
 import (
 	"bufio"
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -105,14 +106,16 @@ var (
 	EOR       = errors.New("End Of Multiple Reply")
 	NACKERROR = errors.New("Not Acknowledge Error")
 
-	UNKNOWNTOPIC = "No registered subscriber for %s."
-	TIMEOUT      = "Timeout (%s) while waiting for reply of call #%d %s(%s)=%s"
+	UNKNOWNTOPIC       = "No registered subscriber for %s."
+	TIMEOUT            = "Timeout (%s) while waiting for reply of call #%d %s(%s)=%s"
+	UNAVAILABLESERVICE = "No service is available for %s."
 )
 
 // Specific error types are define so that we can use type assertion, if needed
 type UnknownTopic error
 type TimeoutError error
 type SystemError error
+type ServiceUnavailableError error
 
 func timeouttime(timeout time.Duration) time.Time {
 	if timeout == time.Duration(0) {
@@ -213,12 +216,12 @@ func NewRequest(wire *Wire, c net.Conn, msg Envelope) *Request {
 			Context: &Context{
 				wire:     wire,
 				conn:     c,
-				Kind:     msg.kind,
-				Name:     msg.name,
-				sequence: msg.sequence,
+				Kind:     msg.Kind,
+				Name:     msg.Name,
+				sequence: msg.Sequence,
 			},
 		},
-		payload: msg.payload,
+		payload: msg.Payload,
 	}
 
 	return ctx
@@ -324,10 +327,10 @@ func NewMsg() *Msg {
 }
 
 type Envelope struct {
-	kind     EKind
-	sequence uint32
-	name     string
-	payload  []byte
+	Kind     EKind
+	Sequence uint32
+	Name     string
+	Payload  []byte
 	handler  func(ctx Response)
 	timeout  time.Duration
 	errch    chan error
@@ -335,12 +338,12 @@ type Envelope struct {
 }
 
 func callMe(env Envelope) bool {
-	return test(env.kind, SUB, UNSUB, REQ, REQALL, PUSH)
+	return test(env.Kind, SUB, UNSUB, REQ, REQALL, PUSH)
 }
 
 func (this Envelope) String() string {
 	return fmt.Sprintf("{kind:%s, sequence:%d, name:%s, payload:%s, handler:%p, timeout:%s, errch:%p",
-		this.kind, this.sequence, this.name, this.payload, this.handler, this.timeout, this.errch)
+		this.Kind, this.Sequence, this.Name, this.Payload, this.handler, this.timeout, this.errch)
 }
 
 type EnvelopeConn struct {
@@ -424,7 +427,7 @@ func (this *Wire) SetConn(c net.Conn) {
 		this.chin = make(chan Envelope, this.bufferSize)
 		this.handlerch = make(chan EnvelopeConn, this.bufferSize)
 		go this.writer(c, this.chin)
-		go this.reader(c)
+		go this.reader(c, this.handlerch)
 		go this.runHandler(this.handlerch)
 	}
 }
@@ -523,16 +526,16 @@ func (this *Wire) SetTimeout(timeout time.Duration) {
 func (this *Wire) Send(msg Envelope) <-chan error {
 	// check first if the peer has the topic before sending.
 	// This is done because remote topics are only available after a connection
-	if test(msg.kind, PUB, PUSH, REQ, REQALL) && !this.hasRemoteTopic(msg.name) {
-		msg.errch <- UnknownTopic(fmt.Errorf(UNKNOWNTOPIC, msg.name))
+	if test(msg.Kind, PUB, PUSH, REQ, REQALL) && !this.hasRemoteTopic(msg.Name) {
+		msg.errch <- UnknownTopic(fmt.Errorf(UNKNOWNTOPIC, msg.Name))
 		return msg.errch
 	}
 
 	if this.OnSend != nil {
 		this.OnSend(SendEvent{
-			Kind:    msg.kind,
-			Name:    msg.name,
-			Payload: msg.payload,
+			Kind:    msg.Kind,
+			Name:    msg.Name,
+			Payload: msg.Payload,
 			Handler: msg.handler,
 		})
 	}
@@ -543,7 +546,7 @@ func (this *Wire) Send(msg Envelope) <-chan error {
 func (this *Wire) sendit(msg Envelope) <-chan error {
 
 	// SUB, UNSUB
-	msg.sequence = atomic.AddUint32(&this.sequence, 1)
+	msg.Sequence = atomic.AddUint32(&this.sequence, 1)
 	//msg.sequence = randomSeq()
 	if this.rateLimiter != nil {
 		this.rateLimiter.TakeN(1)
@@ -558,20 +561,29 @@ func (this *Wire) enqueue(msg Envelope) {
 	defer this.mucb.Unlock()
 
 	if this.chin != nil {
+		// every call will have a new channel, specially when doing REQALL
+		msg.done = make(chan error, 1)
+
+		var respch chan Response
 		if callMe(msg) {
 			// can have several responses (partial or from multiple clients)
-			var respch = make(chan Response, 10)
-			this.callbacks[msg.sequence] = respch
+			respch = make(chan Response, 100)
+			this.callbacks[msg.Sequence] = respch
 			go handleReply(msg, respch)
 		}
 
 		go func() {
 			select {
 			case <-time.After(msg.timeout):
-				this.delCallback(msg.sequence)
-				msg.errch <- TimeoutError(faults.New(TIMEOUT, msg.timeout, msg.sequence, msg.kind, msg.name, msg.payload))
+				this.delCallback(msg.Sequence)
+				var e = TimeoutError(faults.New(TIMEOUT, msg.timeout, msg.Sequence, msg.Kind, msg.Name, msg.Payload))
+				this.logger.Tracef("Timeout failure: %s", e)
+				msg.errch <- e
 			case err := <-msg.done:
 				msg.errch <- err
+			}
+			if respch != nil {
+				close(respch)
 			}
 		}()
 		this.chin <- msg
@@ -581,7 +593,14 @@ func (this *Wire) enqueue(msg Envelope) {
 }
 
 func (this *Wire) reply(kind EKind, seq uint32, payload []byte) {
-	msg := this.newReplyEnvelope(kind, seq, payload)
+	var msg = Envelope{
+		Kind:     kind,
+		Sequence: seq,
+		Payload:  payload,
+		timeout:  this.timeout,
+		errch:    make(chan error, 1),
+	}
+
 	this.enqueue(msg)
 	go func() {
 		err := <-msg.errch
@@ -589,26 +608,6 @@ func (this *Wire) reply(kind EKind, seq uint32, payload []byte) {
 			this.logger.Errorf("%v", err)
 		}
 	}()
-}
-
-/*
-func randomSeq() uint32 {
-	b := make([]byte, 4)
-	rand.Read(b)
-	seq := binary.LittleEndian.Uint32(b)
-	return seq
-}
-*/
-
-func (this *Wire) newReplyEnvelope(kind EKind, seq uint32, payload []byte) Envelope {
-	return Envelope{
-		kind:     kind,
-		sequence: seq,
-		payload:  payload,
-		timeout:  time.Second,
-		errch:    make(chan error, 1),
-		done:     make(chan error, 1),
-	}
 }
 
 // using a channel the messages are sent in order
@@ -636,26 +635,26 @@ func (this *Wire) write(c net.Conn, msg Envelope) (err error) {
 	w := NewOutputStream(buf)
 
 	// kind
-	err = w.WriteUI8(uint8(msg.kind))
+	err = w.WriteUI8(uint8(msg.Kind))
 	if err != nil {
 		return
 	}
 	// channel sequence
-	err = w.WriteUI32(msg.sequence)
+	err = w.WriteUI32(msg.Sequence)
 	if err != nil {
 		return
 	}
 
-	if test(msg.kind, PUB, PUSH, SUB, UNSUB, REQ, REQALL) {
+	if test(msg.Kind, PUB, PUSH, SUB, UNSUB, REQ, REQALL) {
 		// topic
-		err = w.WriteString(msg.name)
+		err = w.WriteString(msg.Name)
 		if err != nil {
 			return
 		}
 	}
-	if test(msg.kind, REQ, REQALL, PUB, PUSH, REP, REP_PARTIAL, ERR, ERR_PARTIAL) {
+	if test(msg.Kind, REQ, REQALL, PUB, PUSH, REP, REP_PARTIAL, ERR, ERR_PARTIAL) {
 		// payload
-		err = w.WriteBytes(msg.payload)
+		err = w.WriteBytes(msg.Payload)
 		if err != nil {
 			return
 		}
@@ -680,7 +679,7 @@ func read(r *InputStream, bname bool, bpayload bool) (name string, payload []byt
 	return
 }
 
-func (this *Wire) reader(c net.Conn) {
+func (this *Wire) reader(c net.Conn, handlerch chan EnvelopeConn) {
 	r := NewInputStream(c)
 	var err error
 
@@ -728,26 +727,23 @@ func (this *Wire) reader(c net.Conn) {
 					break
 				}
 
-				this.handlerch <- EnvelopeConn{
+				handlerch <- EnvelopeConn{
 					message: Envelope{
-						kind:     kind,
-						sequence: seq,
-						name:     name,
-						payload:  data,
+						Kind:     kind,
+						Sequence: seq,
+						Name:     name,
+						Payload:  data,
 					},
 					conn: c,
 				}
 			}
 		} else {
-			// flag if it tha last of multiple replies
-			last := true
 			switch kind {
 			case REP_PARTIAL, REP:
 				_, data, err = read(r, false, true)
 				if err != nil {
 					break
 				}
-				last = kind == REP
 
 			case ERR, ERR_PARTIAL:
 				_, data, err = read(r, false, true)
@@ -764,11 +760,10 @@ func (this *Wire) reader(c net.Conn) {
 					}
 					data = []byte(s)
 				}
-				last = kind == ERR
 			}
 
-			this.logger.Debugf("Read Reply {kind: %s; seq: %d; data: %v} from %s", kind, seq, data, c.RemoteAddr())
-			var respch = this.getCallback(seq, last)
+			this.logger.Debugf("Read Reply {kind: %s; seq: %d; data: %s} from %s", kind, seq, data, c.RemoteAddr())
+			var respch = this.getCallback(seq, test(kind, REP, ERR))
 			if respch != nil {
 				respch <- NewResponse(this, c, kind, seq, data)
 			} else {
@@ -784,12 +779,12 @@ func (this *Wire) reader(c net.Conn) {
 func handleReply(msg Envelope, responses <-chan Response) {
 	for r := range responses {
 		if msg.handler != nil {
+			// if it is the last one,
+			// the handler will take care of it
 			msg.handler(r)
-			// if it is the last one, signal it
-			// by sending nil in the error channel
 			if r.Last() {
+				// signal end of request all, canceling the timeout event
 				msg.done <- nil
-				return
 			}
 		} else if r.Kind == NACK {
 			msg.done <- NACKERROR
@@ -806,13 +801,13 @@ func (this *Wire) runHandler(handlerch chan EnvelopeConn) {
 		msg := msgconn.message
 		c := msgconn.conn
 
-		if msg.kind == REQ || msg.kind == REQALL {
+		if msg.Kind == REQ || msg.Kind == REQALL {
 			// Serve
 			var reply []byte
 			var err error
 			var deferReply bool
 			var terminate bool
-			var handlers = this.findHandlers(msg.name)
+			var handlers = this.findHandlers(msg.Name)
 			if len(handlers) > 0 {
 				var req = NewRequest(this, c, msg)
 				for _, hnd := range handlers {
@@ -842,35 +837,35 @@ func (this *Wire) runHandler(handlerch chan EnvelopeConn) {
 					req.deferReply = false
 				}
 			} else {
-				err = UnknownTopic(faults.New(UNKNOWNTOPIC, msg.name))
+				err = UnknownTopic(faults.New(UNKNOWNTOPIC, msg.Name))
 			}
 
 			// only sends a reply if there was some kind of return action
 			if terminate {
-				this.reply(ACK, msg.sequence, nil)
+				this.reply(ACK, msg.Sequence, nil)
 			} else if !deferReply {
 				if err != nil {
-					msg.kind = ERR
+					msg.Kind = ERR
 					if this.codec != nil {
 						reply, _ = this.codec.Encode(err.Error())
 					} else {
 						reply = []byte(err.Error())
 					}
 				} else {
-					msg.kind = REP
+					msg.Kind = REP
 				}
-				this.reply(msg.kind, msg.sequence, reply)
+				this.reply(msg.Kind, msg.Sequence, reply)
 			}
 		} else { // PUSH & PUB
-			var handlers = this.findHandlers(msg.name)
+			var handlers = this.findHandlers(msg.Name)
 
-			if msg.kind == PUSH {
+			if msg.Kind == PUSH {
 				if len(handlers) > 0 {
-					msg.kind = ACK
+					msg.Kind = ACK
 				} else {
-					msg.kind = NACK
+					msg.Kind = NACK
 				}
-				this.reply(msg.kind, msg.sequence, nil)
+				this.reply(msg.Kind, msg.Sequence, nil)
 			}
 
 			if len(handlers) > 0 {
@@ -1096,7 +1091,7 @@ func NewClientServer() ClientServer {
 	return ClientServer{
 		handlers: make([]handler, 0),
 		uuid:     uuid,
-		Name:     fmt.Sprintf("%X", uuid),
+		Name:     hex.EncodeToString(uuid),
 	}
 }
 
@@ -1141,23 +1136,22 @@ func createEnvelope(kind EKind, name string, payload interface{}, success interf
 	}
 
 	msg := Envelope{
-		kind:    kind,
-		name:    name,
+		Kind:    kind,
+		Name:    name,
 		handler: handler,
 		timeout: timeout,
 		errch:   make(chan error, 1),
-		done:    make(chan error, 1),
 	}
 
 	if payload != nil {
 		switch m := payload.(type) {
 		case []byte:
-			msg.payload = m
+			msg.Payload = m
 		case *Msg:
-			msg.payload = m.buffer.Bytes()
+			msg.Payload = m.buffer.Bytes()
 		default:
 			var err error
-			msg.payload, err = codec.Encode(payload)
+			msg.Payload, err = codec.Encode(payload)
 			if err != nil {
 				return Envelope{}, faults.Wrap(err)
 			}
@@ -1965,92 +1959,145 @@ func (this *Wires) Send(kind EKind, name string, payload interface{}, handler in
 }
 
 func (this *Wires) send(w *Wire, msg Envelope) <-chan error {
-	this.loadBalancer.Prepare(w, msg)
-
 	// fires all registered listeners
 	this.fireSendListener(SendEvent{
-		Kind:    msg.kind,
-		Name:    msg.name,
-		Payload: msg.payload,
+		Kind:    msg.Kind,
+		Name:    msg.Name,
+		Payload: msg.Payload,
 		Handler: msg.handler,
 	})
 
 	return w.sendit(msg)
 }
 
-func wiresTriage(name string, wires []*Wire, skipWire *Wire) []*Wire {
+func wiresTriage(msg Envelope, wires []*Wire, skipWire *Wire) ([]*Wire, error) {
 	var ws = make([]*Wire, 0)
 	for _, w := range wires {
 		// does not send to self
-		if (skipWire == nil || skipWire != w) && w.hasRemoteTopic(name) {
+		if (skipWire == nil || skipWire != w) && w.hasRemoteTopic(msg.Name) {
 			ws = append(ws, w)
 		}
 	}
-	return ws
+	if len(ws) == 0 {
+		return nil, UnknownTopic(fmt.Errorf(UNKNOWNTOPIC, msg.Name))
+	}
+	return ws, nil
+}
+
+func wiresTriageLB(lb LoadBalancer, msg Envelope, wires []*Wire, skipWire *Wire) ([]*Wire, error) {
+	var ws, err = wiresTriage(msg, wires, skipWire)
+	if err != nil {
+		return nil, err
+	}
+	ws, err = lb.PickAll(msg, ws)
+	if err != nil {
+		return nil, err
+	}
+
+	return ws, nil
 }
 
 // SendSkip is the generic function to send messages with the possibility of ignoring the sender
 func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload interface{}, handler interface{}, timeout time.Duration) <-chan error {
-	msg, err := createEnvelope(kind, name, payload, handler, timeout, this.codec)
+	var msg, ex = createEnvelope(kind, name, payload, handler, timeout, this.codec)
 	errch := make(chan error, 1)
-	if err != nil {
-		errch <- err
+	if ex != nil {
+		errch <- ex
 		return errch
 	}
 
-	err = UnknownTopic(fmt.Errorf(UNKNOWNTOPIC, msg.name))
-	if msg.kind == PUSH || msg.kind == REQ {
+	var defErr = ServiceUnavailableError(fmt.Errorf(UNAVAILABLESERVICE, msg.Name))
+	if msg.Kind == PUSH || msg.Kind == REQ {
 		go func() {
 			this.RLock()
-			var wires = wiresTriage(name, this.wires, skipWire)
+			var wires, err = wiresTriage(msg, this.wires, skipWire)
 			this.RUnlock()
+			if err != nil {
+				errch <- err
+				return
+			}
 			var size = len(wires)
 			for i := 0; i < size; i++ {
-				var w = this.loadBalancer.Next(name, wires)
+				var w, err = this.loadBalancer.PickOne(msg, wires)
+				if err != nil {
+					errch <- err
+					return
+				}
 				// REQ can also receive multiple messages from ONE replier
 				err = <-this.send(w, msg)
 				this.loadBalancer.Done(w, msg, err)
 				// exit on success
 				if err == nil {
-					break
+					errch <- nil
+					return
+				} else {
+					this.logger.Debugf("Failed to send %s to %s. Cause=%s", msg, w.Conn().RemoteAddr(), err)
 				}
 			}
-			errch <- err
+			errch <- defErr
 		}()
-	} else if msg.kind == PUB {
-		go func() {
-			for id, group := range this.groups {
-				if id == noGROUP {
-					for _, w := range wiresTriage(name, group, skipWire) {
-						e := <-this.send(w, msg)
+	} else if msg.Kind == PUB {
+		var wg sync.WaitGroup
+		var errs = faults.Errors(make([]error, 0))
+
+		for id, group := range this.groups {
+			var ws, err = wiresTriageLB(this.loadBalancer, msg, group, skipWire)
+			if err != nil {
+				errs.Add(err)
+				defErr = errs
+				continue
+			}
+			if id == noGROUP {
+				wg.Add(1)
+				go func() {
+					for _, w := range ws {
+						var e = <-this.send(w, msg)
 						this.loadBalancer.Done(w, msg, e)
-						if e == nil {
-							err = nil
+						if err == nil {
+							// At least one got through.
+							// Ignoring all errors
+							defErr = nil
+						} else {
+							this.logger.Debugf("Failed to send %s to %s. Cause=%s", msg, w.Conn().RemoteAddr(), e)
 						}
 					}
-				} else {
-					go func(wires []*Wire) {
-						var ws = wiresTriage(name, wires, skipWire)
-						var size = len(ws)
-						for i := 0; i < size; i++ {
-							var w = this.loadBalancer.Next(name, ws)
-							e := <-this.send(w, msg)
-							this.loadBalancer.Done(w, msg, e)
-							// send only to one.
-							// stop if there was a success.
-							if e == nil {
-								break
-							}
-						}
-					}(group)
+					wg.Done()
+				}()
+			} else {
+				for _, w := range ws {
+					fmt.Printf("===>%s -> load=%d\n", w.Conn().RemoteAddr(), w.load.(*Load).value)
 				}
+
+				wg.Add(1)
+				go func(wires []*Wire) {
+					for _, w := range wires {
+						var err = <-this.send(w, msg)
+						this.loadBalancer.Done(w, msg, err)
+						// send only to one.
+						// stop if there was a success.
+						if err == nil {
+							// Ignoring errors
+							defErr = nil
+							break
+						} else {
+							this.logger.Debugf("Failed to send %s to %s. Cause=%s", msg, w.Conn().RemoteAddr(), err)
+						}
+					}
+					wg.Done()
+				}(ws)
 			}
-			errch <- err
+		}
+		go func() {
+			wg.Wait()
+			errch <- defErr
 		}()
-	} else if msg.kind == REQALL {
+
+	} else if msg.Kind == REQALL {
 		var wg sync.WaitGroup
+		var errs = faults.Errors(make([]error, 0))
+
 		// we wrap the reply handler so that we can control the number o replies delivered.
-		handler := msg.handler
+		var handler = msg.handler
 		msg.handler = func(ctx Response) {
 			// since the end mark will be passed to the caller when ALL replies from ALL repliers arrive,
 			// the handler must be called only if it is not a end marker.
@@ -2065,39 +2112,42 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 				if handler != nil {
 					handler(ctx)
 				}
-				// resets the kind
+				// recovers the kind
 				ctx.Kind = kind
 			}
 		}
 
 		// collects wires into groups.
 		for id, group := range this.groups {
+			var ws, err = wiresTriageLB(this.loadBalancer, msg, group, skipWire)
+			if err != nil {
+				errs.Add(err)
+				defErr = errs
+				continue
+			}
 			if id == noGROUP {
-				for _, w := range wiresTriage(name, group, skipWire) {
+				for _, wire := range ws {
 					// increment reply counter
-					this.logger.Tracef("sending message to %s (ungrouped)", w.Conn().RemoteAddr())
 					wg.Add(1)
-					ch := this.send(w, msg)
-					go func() {
+					go func(w *Wire) {
 						// waits for the request completion
-						e := <-ch
+						var e = <-this.send(w, msg)
 						this.loadBalancer.Done(w, msg, e)
 						if e == nil {
-							err = nil // at least one got through
+							// at least one got through
+							// Ignoring errors
+							defErr = nil
 						} else {
 							this.logger.Errorf("Failed requesting all: %+v", e)
 						}
 						wg.Done()
-					}()
+					}(wire)
 				}
 			} else {
 				// increment reply counter
 				wg.Add(1)
 				go func(wires []*Wire) {
-					var ws = wiresTriage(name, wires, skipWire)
-					var size = len(ws)
-					for i := 0; i < size; i++ {
-						var w = this.loadBalancer.Next(name, ws)
+					for _, w := range ws {
 						this.logger.Tracef("sending message to %s (group %s)", w.Conn().RemoteAddr(), id)
 						// waits for the request completion
 						e := <-this.send(w, msg)
@@ -2105,23 +2155,24 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 						// stop if there was a success.
 						this.loadBalancer.Done(w, msg, e)
 						if e == nil {
-							err = nil
+							// Ignoring errors
+							defErr = nil
 							break
 						}
 					}
 					wg.Done()
-				}(group)
+				}(ws)
 			}
 		}
 		go func() {
 			// Wait for all requests to complete.
 			wg.Wait()
-			this.logger.Tracef("all requests finnished")
+			this.logger.Tracef("all requests finnished for %s", msg)
 			// pass the end mark
 			if handler != nil {
 				handler(NewResponse(skipWire, nil, ACK, 0, nil))
 			}
-			errch <- err
+			errch <- defErr
 		}()
 	}
 
@@ -2479,10 +2530,10 @@ type LoadBalancer interface {
 	Add(*Wire)
 	// Remove is called when the wire is killed
 	Remove(*Wire)
-	// Prepare is called before the message is sent
-	Prepare(*Wire, Envelope)
+	// PickOne is called before the message is sent
+	PickOne(Envelope, []*Wire) (*Wire, error)
+	// PickAll is called before the message is sent
+	PickAll(Envelope, []*Wire) ([]*Wire, error)
 	// Complete is called when we are done with the wire
 	Done(*Wire, Envelope, error)
-	//
-	Next(string, []*Wire) *Wire
 }

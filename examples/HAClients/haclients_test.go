@@ -25,7 +25,7 @@ func TestHA(t *testing.T) {
 	cli1 := gomsg.NewClient()
 	cli1.SetGroupId("HA")
 	cli1.Handle("HELLO", func(m string) {
-		fmt.Println("<=== [1] processing:", m)
+		fmt.Println("<=== [HA#1] processing:", m)
 		group1++
 	})
 	<-cli1.Connect("localhost:7777")
@@ -35,7 +35,7 @@ func TestHA(t *testing.T) {
 	cli2 := gomsg.NewClient()
 	cli2.SetGroupId("HA")
 	cli2.Handle("HELLO", func(m string) {
-		fmt.Println("<=== [2] processing:", m)
+		fmt.Println("<=== [HA#2] processing:", m)
 		group2++
 	})
 	<-cli2.Connect("localhost:7777")

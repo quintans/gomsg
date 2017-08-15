@@ -2064,10 +2064,6 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 					wg.Done()
 				}()
 			} else {
-				for _, w := range ws {
-					fmt.Printf("===>%s -> load=%d\n", w.Conn().RemoteAddr(), w.load.(*Load).value)
-				}
-
 				wg.Add(1)
 				go func(wires []*Wire) {
 					for _, w := range wires {

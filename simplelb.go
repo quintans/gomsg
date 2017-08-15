@@ -44,12 +44,12 @@ func (lb SimpleLB) SetQuarantine(quarantine time.Duration) {
 
 // Add adds wire to load balancer
 func (lb SimpleLB) Add(w *Wire) {
-	w.load = new(Load)
+	w.Load = new(Load)
 }
 
 // Remove removes wire from load balancer
 func (lb SimpleLB) Remove(w *Wire) {
-	w.load = nil
+	w.Load = nil
 
 	lb.Lock()
 	defer lb.Unlock()
@@ -57,7 +57,7 @@ func (lb SimpleLB) Remove(w *Wire) {
 }
 
 func (lb SimpleLB) Done(w *Wire, msg Envelope, err error) {
-	var load = w.load.(*Load)
+	var load = w.Load.(*Load)
 	if err == nil {
 		load.failures = 0
 		// with kind is REQALL or PUB, the PickAll method is used.
@@ -80,7 +80,7 @@ func (lb SimpleLB) Done(w *Wire, msg Envelope, err error) {
 }
 
 func addLoad(wire *Wire) {
-	var load = wire.load.(*Load)
+	var load = wire.Load.(*Load)
 	atomic.AddUint64(&load.value, 1)
 	fmt.Printf("===>Setting LOAD: %s -> load=%d\n", wire.Conn().RemoteAddr(), load.value)
 }
@@ -106,7 +106,7 @@ func (lb SimpleLB) PickOne(msg Envelope, wires []*Wire) (*Wire, error) {
 	var minw *Wire
 
 	for _, w := range valid {
-		var load = w.load.(*Load)
+		var load = w.Load.(*Load)
 		if now.After(load.quarantineUntil) && load.value < min {
 			min = load.value
 			minw = w
@@ -127,7 +127,7 @@ func (lb SimpleLB) PickAll(msg Envelope, wires []*Wire) ([]*Wire, error) {
 	var now = time.Now()
 	var ws = make([]*Wire, 0, len(wires))
 	for _, w := range wires {
-		var load = w.load.(*Load)
+		var load = w.Load.(*Load)
 		if now.After(load.quarantineUntil) {
 			ws = append(ws, w)
 		}
@@ -138,8 +138,8 @@ func (lb SimpleLB) PickAll(msg Envelope, wires []*Wire) ([]*Wire, error) {
 
 	// sort by load
 	sort.Slice(ws, func(i, j int) bool {
-		var loadi = ws[i].load.(*Load)
-		var loadj = ws[j].load.(*Load)
+		var loadi = ws[i].Load.(*Load)
+		var loadj = ws[j].Load.(*Load)
 		return loadi.value < loadj.value
 	})
 

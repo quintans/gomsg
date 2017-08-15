@@ -39,7 +39,7 @@ func (lb RoundRobinLB) Add(w *Wire) {
 
 // Remove removes wire from load balancer
 func (lb RoundRobinLB) Remove(w *Wire) {
-	w.load = nil
+	w.Load = nil
 
 	lb.Lock()
 	defer lb.Unlock()
@@ -49,11 +49,11 @@ func (lb RoundRobinLB) Remove(w *Wire) {
 func (lb RoundRobinLB) Done(w *Wire, msg Envelope, err error) {
 	if err != nil {
 		var load *Quarentine
-		if w.load == nil {
+		if w.Load == nil {
 			load = new(Quarentine)
-			w.load = load
+			w.Load = load
 		} else {
-			load = w.load.(*Quarentine)
+			load = w.Load.(*Quarentine)
 		}
 		load.until = time.Now().Add(lb.quarantine)
 
@@ -96,7 +96,7 @@ func (lb RoundRobinLB) PickAll(msg Envelope, wires []*Wire) ([]*Wire, error) {
 	var now = time.Now()
 	var ws = make([]*Wire, 0, len(wires))
 	for _, w := range wires {
-		var load = w.load.(*Quarentine)
+		var load = w.Load.(*Quarentine)
 		if now.After(load.until) {
 			ws = append(ws, w)
 		}

@@ -62,7 +62,7 @@ func (st Stickies) IsSticky(name string, wires []*Wire) (*Wire, *Sticky) {
 	// find last used wire
 	for _, v := range wires {
 		if v == stick.lastWire {
-			var load = v.load.(*Load)
+			var load = v.Load.(*Load)
 			if now.After(load.quarantineUntil) {
 				return v, stick
 			} else {

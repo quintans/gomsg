@@ -231,6 +231,7 @@ func NewRequest(wire *Wire, c net.Conn, msg Envelope) *Request {
 func (this *Request) Next() {
 	if this.middlewarePos < len(this.middleware)-1 {
 		this.middlewarePos++
+		// call it
 		this.middleware[this.middlewarePos](this)
 		this.middlewarePos--
 	}

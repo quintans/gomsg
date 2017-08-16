@@ -18,7 +18,6 @@ func wait() {
 
 func main() {
 	server := gomsg.NewServer()
-	server.Name = "Server"
 	// keep alive
 	var timeout = gomsg.NewTimeout(CLEAN_CYCLE, time.Second, func(o interface{}) {
 		c := o.(net.Conn)
@@ -50,7 +49,6 @@ func main() {
 	wait()
 
 	cli := gomsg.NewClient()
-	cli.Name = "Cli#1"
 	cli.SetReconnectInterval(0)
 	cli.Handle("HELLO", func(ctx *gomsg.Request, m string) (string, error) {
 		fmt.Println("<=== [1] processing:", m, "from", ctx.Connection().RemoteAddr())
@@ -60,12 +58,10 @@ func main() {
 
 	// just to get in the way
 	cli3 := gomsg.NewClient()
-	cli3.Name = "Cli#3"
 	cli3.SetReconnectInterval(0)
 	<-cli3.Connect("localhost:7777")
 
 	cli2 := gomsg.NewClient()
-	cli2.Name = "Cli#2"
 	cli2.SetReconnectInterval(0)
 	cli2.Handle("HELLO", func(ctx *gomsg.Request, m string) (string, error) {
 		fmt.Println("<=== [2] processing:", m, "from", ctx.Connection().RemoteAddr())

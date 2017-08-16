@@ -34,7 +34,6 @@ package gomsg
 import (
 	"bufio"
 	"bytes"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -367,14 +366,15 @@ type Wire struct {
 	disconnect   func(net.Conn, error)
 	findHandlers func(name string) []handler
 
-	mutop         sync.RWMutex
-	remoteGroupID string // it is used for High Availability
-	localGroupID  string // it is used for High Availability
-	remoteUuid    []byte
-	remoteTopics  map[string]bool
-	OnSend        SendListener
-	OnNewTopic    TopicListener
-	OnDropTopic   TopicListener
+	mutop          sync.RWMutex
+	remoteGroupID  string // it is used for High Availability
+	localGroupID   string // it is used for High Availability
+	remoteUuid     tk.UUID
+	remoteTopics   map[string]bool
+	remoteMetadata map[string]interface{}
+	OnSend         SendListener
+	OnNewTopic     TopicListener
+	OnDropTopic    TopicListener
 
 	// load balancer failure policy
 	Policy LBPolicy
@@ -395,6 +395,10 @@ func NewWire(codec Codec, l log.ILogger) *Wire {
 	}
 
 	return wire
+}
+
+func (this *Wire) RemoteMetadata() map[string]interface{} {
+	return this.remoteMetadata
 }
 
 func (this *Wire) SetLogger(l log.ILogger) {
@@ -455,10 +459,9 @@ func (this *Wire) stop() {
 
 func (this *Wire) Destroy() {
 	if this.OnDropTopic != nil {
-		var addr = this.conn.RemoteAddr().String()
 		for k := range this.remoteTopics {
 			// use trigger
-			this.OnDropTopic(TopicEvent{this.remoteUuid, addr, k})
+			this.OnDropTopic(TopicEvent{this, k})
 		}
 	}
 
@@ -468,12 +471,12 @@ func (this *Wire) Destroy() {
 }
 
 func (this *Wire) addRemoteTopic(name string) {
-	if this.OnNewTopic != nil {
-		this.OnNewTopic(TopicEvent{this.remoteUuid, this.conn.RemoteAddr().String(), name})
-	}
 	this.mutop.Lock()
-	defer this.mutop.Unlock()
+	if this.OnNewTopic != nil {
+		this.OnNewTopic(TopicEvent{this, name})
+	}
 	this.remoteTopics[name] = true
+	this.mutop.Unlock()
 }
 
 func (this *Wire) deleteRemoteTopic(name string) {
@@ -482,7 +485,7 @@ func (this *Wire) deleteRemoteTopic(name string) {
 	this.mutop.Unlock()
 
 	if this.OnDropTopic != nil {
-		this.OnDropTopic(TopicEvent{this.remoteUuid, this.conn.RemoteAddr().String(), name})
+		this.OnDropTopic(TopicEvent{this, name})
 	}
 }
 
@@ -879,6 +882,10 @@ func (this *Wire) runHandler(handlerch chan EnvelopeConn) {
 	}
 }
 
+func (this *Wire) RemoteUuid() tk.UUID {
+	return this.remoteUuid
+}
+
 func validateSigErr(params []reflect.Type, contextType reflect.Type) (bool, bool, reflect.Type, bool) {
 	order := 0
 	var hasContext, hasError bool
@@ -1074,15 +1081,20 @@ type handler struct {
 	calls []Middleware
 }
 
+type ClientServerConfig struct {
+}
+
 type ClientServer struct {
-	uuid     []byte
+	uuid     tk.UUID
 	muhnd    sync.RWMutex
 	handlers []handler
 
 	muconn    sync.RWMutex
 	OnConnect func(w *Wire)
 	OnClose   func(c net.Conn)
-	Name      string
+	// this data will be transmited only on connect
+	// and it will be available on the destination wire.
+	metadata map[string]interface{}
 }
 
 func NewClientServer() ClientServer {
@@ -1090,8 +1102,12 @@ func NewClientServer() ClientServer {
 	return ClientServer{
 		handlers: make([]handler, 0),
 		uuid:     uuid,
-		Name:     hex.EncodeToString(uuid),
+		metadata: make(map[string]interface{}),
 	}
+}
+
+func (this *ClientServer) Metadata() map[string]interface{} {
+	return this.metadata
 }
 
 func (this *ClientServer) removeHandler(name string) {
@@ -1327,22 +1343,22 @@ func (this *Client) handshake(c net.Conn) error {
 	}
 	this.muhnd.RUnlock()
 
-	err := serializeHanshake(c, this.Wire.codec, time.Second, this.uuid, payload)
+	err := serializeHanshake(c, this.Wire.codec, time.Second, this.uuid, payload, this.metadata)
 	if err != nil {
 		return err
 	}
 
 	// get reply
-	uuid, group, remoteTopics, err := deserializeHandshake(c, this.Wire.codec, time.Second)
+	uuid, group, remoteTopics, metadata, err := deserializeHandshake(c, this.Wire.codec, time.Second)
 	if err != nil {
 		return err
 	}
 	this.Wire.mutop.Lock()
 	this.Wire.remoteUuid = uuid
 	this.Wire.remoteTopics = remoteTopics
-	var addr = c.RemoteAddr().String()
+	this.Wire.remoteMetadata = metadata
 	for k := range remoteTopics {
-		this.fireNewTopicListeners(TopicEvent{this.Wire.remoteUuid, addr, k})
+		this.fireNewTopicListeners(TopicEvent{this.Wire, k})
 	}
 	this.Wire.remoteGroupID = group
 	this.Wire.mutop.Unlock()
@@ -1350,25 +1366,22 @@ func (this *Client) handshake(c net.Conn) error {
 	return nil
 }
 
-func serializeHanshake(c net.Conn, codec Codec, timeout time.Duration, uuid []byte, payload []string) error {
-	var data []byte
-	var err error
-	if codec != nil {
-		data, err = codec.Encode(payload)
-		if err != nil {
-			return faults.Wrap(err)
-		}
-	} else {
-		var buf = new(bytes.Buffer)
-		os := NewOutputStream(buf)
-		err = os.WriteUI16(uint16(len(payload)))
-		if err != nil {
-			return err
-		}
-		for _, v := range payload {
-			os.WriteString(v)
-		}
-		data = buf.Bytes()
+func serializeHanshake(
+	c net.Conn,
+	codec Codec,
+	timeout time.Duration,
+	uuid tk.UUID,
+	payload []string,
+	metadata map[string]interface{},
+) error {
+	var data, err = codec.Encode(payload)
+	if err != nil {
+		return faults.Wrap(err)
+	}
+	var meta []byte
+	meta, err = codec.Encode(metadata)
+	if err != nil {
+		return faults.Wrap(err)
 	}
 
 	c.SetWriteDeadline(timeouttime(timeout))
@@ -1376,7 +1389,7 @@ func serializeHanshake(c net.Conn, codec Codec, timeout time.Duration, uuid []by
 	var w = bufio.NewWriter(c)
 	var os = NewOutputStream(w)
 	// uuid
-	_, err = os.writer.Write(uuid)
+	_, err = os.writer.Write(uuid.Bytes())
 	if err != nil {
 		return faults.Wrap(err)
 	}
@@ -1384,52 +1397,57 @@ func serializeHanshake(c net.Conn, codec Codec, timeout time.Duration, uuid []by
 	if err != nil {
 		return err
 	}
+	err = os.WriteBytes(meta)
+	if err != nil {
+		return err
+	}
 	return w.Flush()
 }
 
-func deserializeHandshake(c net.Conn, codec Codec, timeout time.Duration) ([]byte, string, map[string]bool, error) {
+func deserializeHandshake(c net.Conn, codec Codec, timeout time.Duration) (tk.UUID, string, map[string]bool, map[string]interface{}, error) {
 	c.SetReadDeadline(timeouttime(timeout))
 
 	r := NewInputStream(c)
-	var data, err = r.ReadNBytes(16)
+	// remote uuid
+	var data, err = r.ReadNBytes(tk.UUID_SIZE)
 	if err != nil {
-		return nil, "", nil, faults.Wrap(err)
+		return tk.UUID{}, "", nil, nil, faults.Wrap(err)
 	}
-	var uuid = data
+	var uuid, _ = tk.ToUUID(data)
+	// group id + topics
 	data, err = r.ReadBytes()
 	if err != nil {
-		return nil, "", nil, faults.Wrap(err)
+		return tk.UUID{}, "", nil, nil, faults.Wrap(err)
 	}
-	var topics []string
-	if codec != nil {
-		var e = codec.Decode(data, &topics)
-		if e != nil {
-			panic(fmt.Sprintf("Unable to decode %s; cause=%s", data, e))
-		}
+	// metada
+	var meta []byte
+	meta, err = r.ReadBytes()
+	if err != nil {
+		return tk.UUID{}, "", nil, nil, faults.Wrap(err)
+	}
 
-	} else {
-		var buf = bytes.NewBuffer(data)
-		is := NewInputStream(buf)
-		size, err := is.ReadUI16()
-		if err != nil {
-			return nil, "", nil, faults.Wrap(err)
-		}
-		topics = make([]string, size)
-		var length = int(size)
-		for i := 0; i < length; i++ {
-			topics[i], err = is.ReadString()
-			if err != nil {
-				return nil, "", nil, faults.Wrap(err)
-			}
-		}
+	// DECODING
+	// group id + topics
+	var topics []string
+	err = codec.Decode(data, &topics)
+	if err != nil {
+		return tk.UUID{}, "", nil, nil, faults.Wrap(err)
 	}
+
 	var identity = topics[0]
 	topics = topics[1:]
-	remoteTopics := make(map[string]bool)
+	var remoteTopics = make(map[string]bool)
 	for _, v := range topics {
 		remoteTopics[v] = true
 	}
-	return uuid, identity, remoteTopics, nil
+	// metada
+	var metadata = make(map[string]interface{})
+	err = codec.Decode(meta, &metadata)
+	if err != nil {
+		return tk.UUID{}, "", nil, nil, faults.Wrap(err)
+	}
+
+	return uuid, identity, remoteTopics, metadata, nil
 }
 
 // connect is seperated to allow the definition and use of OnConnect
@@ -1440,6 +1458,7 @@ func (this *Client) Connect(addr string) <-chan error {
 	return cherr
 }
 
+// Address returns the Server address
 func (this *Client) Address() string {
 	return this.addr
 }
@@ -1479,9 +1498,9 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 		// gets the connection
 		c, err = net.DialTimeout("tcp", this.addr, time.Second)
 		if err != nil {
-			this.logger.Tracef("%s: failed to connect to %s", this.Name, this.addr)
+			this.logger.Tracef("Failed to connect to %s", this.addr)
 			if this.reconnectInterval > 0 {
-				this.logger.Tracef("%s: retry connecting to %s in %v", this.Name, this.addr, retry)
+				this.logger.Tracef("retry connecting to %s in %v", this.addr, retry)
 				time.Sleep(retry)
 				if this.reconnectMaxInterval > 0 && retry < this.reconnectMaxInterval {
 					retry = retry * 2
@@ -1645,9 +1664,12 @@ type SendEvent struct {
 type TopicListener func(event TopicEvent)
 
 type TopicEvent struct {
-	Source     []byte // source uuid
-	SourceAddr string
-	Name       string // topic name
+	Wire *Wire
+	Name string // topic name
+}
+
+func (e TopicEvent) String() string {
+	return fmt.Sprintf("{Name: %q, SourceAddr: %q, Source: %s}", e.Name, e.Wire.Conn().RemoteAddr(), e.Wire.remoteUuid)
 }
 
 // NewWires creates a Wires structure
@@ -1793,7 +1815,6 @@ func (this *Wires) Destroy() {
 
 func (this *Wires) Add(wire *Wire) {
 	this.Lock()
-	defer this.Unlock()
 
 	// if already defined (same connection) panics
 	for _, v := range this.wires {
@@ -1802,6 +1823,17 @@ func (this *Wires) Add(wire *Wire) {
 		}
 	}
 
+	this.wires = append(this.wires, wire)
+
+	var group = this.groups[wire.remoteGroupID]
+	if group == nil {
+		group = make([]*Wire, 0)
+	}
+	this.groups[wire.remoteGroupID] = append(group, wire)
+
+	this.Unlock()
+
+	wire.mutop.RLock()
 	// set common codec
 	wire.codec = this.codec
 	if this.rateLimiterFactory != nil {
@@ -1817,20 +1849,13 @@ func (this *Wires) Add(wire *Wire) {
 		this.fireDropTopicListener(event)
 	}
 
-	var addr = wire.conn.RemoteAddr().String()
-	for k := range wire.remoteTopics {
-		// use trigger
-		wire.OnNewTopic(TopicEvent{wire.remoteUuid, addr, k})
-	}
-
-	this.wires = append(this.wires, wire)
 	this.loadBalancer.Add(wire)
 
-	var group = this.groups[wire.remoteGroupID]
-	if group == nil {
-		group = make([]*Wire, 0)
+	for k := range wire.remoteTopics {
+		// use trigger
+		wire.OnNewTopic(TopicEvent{wire, k})
 	}
-	this.groups[wire.remoteGroupID] = append(group, wire)
+	wire.mutop.RUnlock()
 }
 
 func (this *Wires) Get(conn net.Conn) *Wire {
@@ -2314,12 +2339,13 @@ func (this *Server) Port() int {
 
 func (this *Server) handshake(c net.Conn, wire *Wire) (string, map[string]bool, error) {
 	// get remote topics
-	uuid, group, payload, err := deserializeHandshake(c, wire.codec, time.Second)
+	uuid, group, payload, metadata, err := deserializeHandshake(c, wire.codec, time.Second)
 	if err != nil {
 		return "", nil, err
 	}
-	// use the uuid from the client
+
 	wire.remoteUuid = uuid
+	wire.remoteMetadata = metadata
 
 	// send identity and local topics
 	this.muhnd.RLock()
@@ -2333,7 +2359,7 @@ func (this *Server) handshake(c net.Conn, wire *Wire) (string, map[string]bool, 
 	}
 	this.muhnd.RUnlock()
 
-	err = serializeHanshake(c, wire.codec, time.Second, this.uuid, topics)
+	err = serializeHanshake(c, wire.codec, time.Second, this.uuid, topics, this.metadata)
 	if err != nil {
 		return "", nil, err
 	}

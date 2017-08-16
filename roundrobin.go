@@ -8,38 +8,65 @@ import (
 	"time"
 )
 
-var _ LoadBalancer = RoundRobinLB{}
+var _ LBPolicy = &SimpleLBPolicy{}
 
-type Quarentine struct {
-	until time.Time
+type SimpleLBPolicy struct {
+	Quarantine time.Duration
+	until      time.Time
 }
+
+func (this *SimpleLBPolicy) AddLoad(name string) uint64 {
+	return 0
+}
+
+func (this *SimpleLBPolicy) Load(name string) uint64 {
+	return 0
+}
+
+func (this *SimpleLBPolicy) Failed(name string) {
+	this.until = time.Now().Add(this.Quarantine)
+}
+
+func (this *SimpleLBPolicy) Succeeded(string) {
+}
+
+func (this *SimpleLBPolicy) InQuarantine(string) bool {
+	return time.Now().Before(this.until)
+}
+
+var _ LoadBalancer = RoundRobinLB{}
 
 type RoundRobinLB struct {
 	sync.RWMutex
 	Stickies
 
-	quarantine time.Duration
-	counter    uint64
+	policyFactory func() LBPolicy
+	counter       uint64
 }
 
 func NewRoundRobinLB() RoundRobinLB {
 	return RoundRobinLB{
-		Stickies:   make(map[string]*Sticky),
-		quarantine: time.Second * 5,
+		Stickies: make(map[string]*Sticky),
+		policyFactory: func() LBPolicy {
+			return &SimpleLBPolicy{
+				Quarantine: time.Second * 5,
+			}
+		},
 	}
 }
 
-func (lb RoundRobinLB) SetQuarantine(quarantine time.Duration) {
-	lb.quarantine = quarantine
+func (lb RoundRobinLB) SetPolicyFactory(factory func() LBPolicy) {
+	lb.policyFactory = factory
 }
 
 // Add adds wire to load balancer
 func (lb RoundRobinLB) Add(w *Wire) {
+	w.Policy = lb.policyFactory()
 }
 
 // Remove removes wire from load balancer
 func (lb RoundRobinLB) Remove(w *Wire) {
-	w.Load = nil
+	w.Policy = nil
 
 	lb.Lock()
 	defer lb.Unlock()
@@ -48,14 +75,7 @@ func (lb RoundRobinLB) Remove(w *Wire) {
 
 func (lb RoundRobinLB) Done(w *Wire, msg Envelope, err error) {
 	if err != nil {
-		var load *Quarentine
-		if w.Load == nil {
-			load = new(Quarentine)
-			w.Load = load
-		} else {
-			load = w.Load.(*Quarentine)
-		}
-		load.until = time.Now().Add(lb.quarantine)
+		w.Policy.Failed(msg.Name)
 
 		lb.Lock()
 		defer lb.Unlock()
@@ -79,8 +99,8 @@ func (lb RoundRobinLB) PickOne(msg Envelope, wires []*Wire) (*Wire, error) {
 		return wire, nil
 	}
 
-	var pos = lb.counter % uint64(len(valid))
-	var w = valid[int(pos)]
+	// since valid is sorted, the first one has the lowest load
+	var w = valid[0]
 	if sticker != nil {
 		sticker.lastWire = w
 	}
@@ -93,11 +113,10 @@ func (lb RoundRobinLB) PickOne(msg Envelope, wires []*Wire) (*Wire, error) {
 func (lb RoundRobinLB) PickAll(msg Envelope, wires []*Wire) ([]*Wire, error) {
 	// NOTE: for messages of type PUB and REQALL the sticker does not make sense
 
-	var now = time.Now()
+	// make array with the max capacity
 	var ws = make([]*Wire, 0, len(wires))
 	for _, w := range wires {
-		var load = w.Load.(*Quarentine)
-		if now.After(load.until) {
+		if !w.Policy.InQuarantine(msg.Name) {
 			ws = append(ws, w)
 		}
 	}

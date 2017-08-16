@@ -4,52 +4,91 @@ import (
 	"fmt"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
-// this implementation includes the circuit breaker pattern
+var _ LBPolicy = &HysteresisPolicy{}
+
+type HysteresisPolicy struct {
+	MaxFailures     int
+	failures        int
+	MinSuccesses    int
+	successes       int
+	Quarantine      time.Duration
+	quarantineUntil time.Time
+	load            uint64
+}
+
+func (this *HysteresisPolicy) AddLoad(name string) uint64 {
+	this.load++
+	return this.load
+}
+
+func (this *HysteresisPolicy) Load(name string) uint64 {
+	return this.load
+}
+
+func (this *HysteresisPolicy) Failed(name string) {
+	if this.failures >= this.MaxFailures {
+		// OPEN
+		this.successes = 0
+		this.quarantineUntil = time.Now().Add(this.Quarantine)
+		return
+	}
+
+	this.successes = 0
+	this.failures++
+}
+
+func (this *HysteresisPolicy) Succeeded(string) {
+	if this.successes >= this.MinSuccesses {
+		// CLOSE
+		this.failures = 0
+		return
+	}
+	if this.failures < this.MaxFailures {
+		// not OPEN
+		this.failures = 0
+	}
+	this.successes++
+}
+
+func (this *HysteresisPolicy) InQuarantine(string) bool {
+	return time.Now().Before(this.quarantineUntil)
+}
 
 var _ LoadBalancer = SimpleLB{}
-
-type Load struct {
-	value           uint64
-	failures        int
-	quarantineUntil time.Time
-}
 
 type SimpleLB struct {
 	sync.RWMutex
 	Stickies
-
-	maxFailures int
-	quarantine  time.Duration
+	policyFactory func() LBPolicy
 }
 
 func NewSimpleLB() SimpleLB {
 	return SimpleLB{
-		Stickies:    make(map[string]*Sticky),
-		quarantine:  time.Second * 10,
-		maxFailures: 3,
+		Stickies: make(map[string]*Sticky),
+		policyFactory: func() LBPolicy {
+			return &HysteresisPolicy{
+				Quarantine:  time.Second * 10,
+				MaxFailures: 3,
+			}
+		},
 	}
 }
 
-func (lb SimpleLB) MaxFailures(maxFailures int) {
-	lb.maxFailures = maxFailures
-}
-
-func (lb SimpleLB) SetQuarantine(quarantine time.Duration) {
-	lb.quarantine = quarantine
+func (lb SimpleLB) SetPolicyFactory(factory func() LBPolicy) {
+	lb.policyFactory = factory
 }
 
 // Add adds wire to load balancer
 func (lb SimpleLB) Add(w *Wire) {
-	w.Load = new(Load)
+	w.Policy = lb.policyFactory()
 }
 
 // Remove removes wire from load balancer
 func (lb SimpleLB) Remove(w *Wire) {
-	w.Load = nil
+	w.Policy = nil
 
 	lb.Lock()
 	defer lb.Unlock()
@@ -57,32 +96,22 @@ func (lb SimpleLB) Remove(w *Wire) {
 }
 
 func (lb SimpleLB) Done(w *Wire, msg Envelope, err error) {
-	var load = w.Load.(*Load)
 	if err == nil {
-		load.failures = 0
-		// with kind is REQALL or PUB, the PickAll method is used.
+		w.Policy.Succeeded(msg.Name)
+		// when kind is REQALL or PUB, the PickAll method is used.
 		// That method does not increase the load.
 		// Since in REQALL and PUB we might only use one connection (groups),
 		// we incease the load on delivery
 		if test(msg.Kind, REQALL, PUB) {
-			addLoad(w)
+			w.Policy.AddLoad(msg.Name)
 		}
 	} else {
-		load.failures++
-		if load.failures >= lb.maxFailures {
-			load.quarantineUntil = time.Now().Add(lb.quarantine)
-		}
+		w.Policy.Failed(msg.Name)
 
 		lb.Lock()
 		defer lb.Unlock()
 		lb.Unstick(w)
 	}
-}
-
-func addLoad(wire *Wire) {
-	var load = wire.Load.(*Load)
-	atomic.AddUint64(&load.value, 1)
-	fmt.Printf("===>Setting LOAD: %s -> load=%d\n", wire.Conn().RemoteAddr(), load.value)
 }
 
 func (lb SimpleLB) PickOne(msg Envelope, wires []*Wire) (*Wire, error) {
@@ -92,43 +121,31 @@ func (lb SimpleLB) PickOne(msg Envelope, wires []*Wire) (*Wire, error) {
 		return nil, err
 	}
 
-	var now = time.Now()
 	lb.Lock()
 	var wire, sticker = lb.IsSticky(msg.Name, valid)
 	lb.Unlock()
 	if wire != nil {
-		addLoad(wire)
+		wire.Policy.AddLoad(msg.Name)
 		return wire, nil
 	}
 
-	// find the wire with the lowest load
-	var min = ^uint64(0) // max for uint64
-	var minw *Wire
-
-	for _, w := range valid {
-		var load = w.Load.(*Load)
-		if now.After(load.quarantineUntil) && load.value < min {
-			min = load.value
-			minw = w
-		}
-	}
+	// since valid is sorted, the first one has the lowest load
+	var minw = valid[0]
 
 	if sticker != nil {
 		sticker.lastWire = minw
 	}
 	// prepare
-	addLoad(minw)
+	minw.Policy.AddLoad(msg.Name)
 	return minw, nil
 }
 
 func (lb SimpleLB) PickAll(msg Envelope, wires []*Wire) ([]*Wire, error) {
 	// NOTE: for messages of type PUB and REQALL the sticker does not make sense
 
-	var now = time.Now()
 	var ws = make([]*Wire, 0, len(wires))
 	for _, w := range wires {
-		var load = w.Load.(*Load)
-		if now.After(load.quarantineUntil) {
+		if !w.Policy.InQuarantine(msg.Name) {
 			ws = append(ws, w)
 		}
 	}
@@ -138,9 +155,9 @@ func (lb SimpleLB) PickAll(msg Envelope, wires []*Wire) ([]*Wire, error) {
 
 	// sort by load
 	sort.Slice(ws, func(i, j int) bool {
-		var loadi = ws[i].Load.(*Load)
-		var loadj = ws[j].Load.(*Load)
-		return loadi.value < loadj.value
+		var loadi = ws[i].Policy.Load(msg.Name)
+		var loadj = ws[j].Policy.Load(msg.Name)
+		return loadi < loadj
 	})
 
 	return ws, nil

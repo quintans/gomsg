@@ -376,8 +376,8 @@ type Wire struct {
 	OnNewTopic    TopicListener
 	OnDropTopic   TopicListener
 
-	// load can be anything defined by the loadbalancer
-	load interface{}
+	// load balancer failure policy
+	Policy LBPolicy
 
 	rateLimiter tk.Rate
 	bufferSize  int
@@ -546,9 +546,7 @@ func (this *Wire) Send(msg Envelope) <-chan error {
 
 func (this *Wire) sendit(msg Envelope) <-chan error {
 
-	// SUB, UNSUB
 	msg.Sequence = atomic.AddUint32(&this.sequence, 1)
-	//msg.sequence = randomSeq()
 	if this.rateLimiter != nil {
 		this.rateLimiter.TakeN(1)
 	}
@@ -2523,6 +2521,7 @@ func isClosed(e error) bool {
 }
 
 type LoadBalancer interface {
+	SetPolicyFactory(func() LBPolicy)
 	// Add is called when a new wire is created
 	Add(*Wire)
 	// Remove is called when the wire is killed
@@ -2531,6 +2530,17 @@ type LoadBalancer interface {
 	PickOne(Envelope, []*Wire) (*Wire, error)
 	// PickAll is called before the message is sent
 	PickAll(Envelope, []*Wire) ([]*Wire, error)
-	// Complete is called when we are done with the wire
+	// Done is called when we are done with one wire
 	Done(*Wire, Envelope, error)
+}
+
+type LBPolicy interface {
+	AddLoad(string) uint64
+	Load(string) uint64
+	// Failed is called when an error ocurrs.
+	Failed(string)
+	// Failed is called when a success ocurrs.
+	Succeeded(string)
+	// InQuarantine returns if it is in quarantine
+	InQuarantine(string) bool
 }

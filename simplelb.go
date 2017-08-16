@@ -19,7 +19,7 @@ type HysteresisPolicy struct {
 	load            uint64
 }
 
-func (this *HysteresisPolicy) AddLoad(name string) uint64 {
+func (this *HysteresisPolicy) IncLoad(name string) uint64 {
 	this.load++
 	return this.load
 }
@@ -103,7 +103,7 @@ func (lb SimpleLB) Done(w *Wire, msg Envelope, err error) {
 		// Since in REQALL and PUB we might only use one connection (groups),
 		// we incease the load on delivery
 		if test(msg.Kind, REQALL, PUB) {
-			w.Policy.AddLoad(msg.Name)
+			w.Policy.IncLoad(msg.Name)
 		}
 	} else {
 		w.Policy.Failed(msg.Name)
@@ -125,7 +125,7 @@ func (lb SimpleLB) PickOne(msg Envelope, wires []*Wire) (*Wire, error) {
 	var wire, sticker = lb.IsSticky(msg.Name, valid)
 	lb.Unlock()
 	if wire != nil {
-		wire.Policy.AddLoad(msg.Name)
+		wire.Policy.IncLoad(msg.Name)
 		return wire, nil
 	}
 
@@ -136,7 +136,7 @@ func (lb SimpleLB) PickOne(msg Envelope, wires []*Wire) (*Wire, error) {
 		sticker.lastWire = minw
 	}
 	// prepare
-	minw.Policy.AddLoad(msg.Name)
+	minw.Policy.IncLoad(msg.Name)
 	return minw, nil
 }
 

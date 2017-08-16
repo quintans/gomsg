@@ -2213,6 +2213,14 @@ func (this *Server) fireBindListeners(event net.Listener) {
 }
 
 // BindAddress returns the listener address
+func (this *Server) BindAddress() net.Addr {
+	if this.listener != nil {
+		return this.listener.Addr()
+	}
+	return nil
+}
+
+// BindPort returns the listener port
 func (this *Server) BindPort() int {
 	if this.listener != nil {
 		return this.listener.Addr().(*net.TCPAddr).Port
@@ -2535,7 +2543,7 @@ type LoadBalancer interface {
 }
 
 type LBPolicy interface {
-	AddLoad(string) uint64
+	IncLoad(string) uint64
 	Load(string) uint64
 	// Failed is called when an error ocurrs.
 	Failed(string)

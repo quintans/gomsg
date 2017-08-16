@@ -15,7 +15,7 @@ type SimpleLBPolicy struct {
 	until      time.Time
 }
 
-func (this *SimpleLBPolicy) AddLoad(name string) uint64 {
+func (this *SimpleLBPolicy) IncLoad(name string) uint64 {
 	return 0
 }
 

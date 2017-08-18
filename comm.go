@@ -346,6 +346,22 @@ func (this Envelope) String() string {
 		this.Kind, this.Sequence, this.Name, this.Payload, this.handler, this.timeout, this.errch)
 }
 
+func (this Envelope) Reply(r Response) {
+	if this.handler != nil {
+		// if it is the last one,
+		// the handler will take care of it
+		this.handler(r)
+		if r.Last() {
+			// signal end of request all, canceling the timeout event
+			this.done <- nil
+		}
+	} else if r.Kind == NACK {
+		this.done <- NACKERROR
+	} else {
+		this.done <- nil
+	}
+}
+
 type EnvelopeConn struct {
 	message Envelope
 	conn    net.Conn
@@ -395,6 +411,19 @@ func NewWire(codec Codec, l log.ILogger) *Wire {
 	}
 
 	return wire
+}
+
+func (this *Wire) cloneTopics() []string {
+	this.mutop.RLock()
+	tps := make([]string, len(this.remoteTopics))
+	var i = 0
+	for k := range this.remoteTopics {
+		tps[i] = k
+		i++
+	}
+	this.mutop.RUnlock()
+
+	return tps
 }
 
 func (this *Wire) RemoteMetadata() map[string]interface{} {
@@ -453,15 +482,19 @@ func (this *Wire) stop() {
 		this.handlerch = nil
 
 		this.callbacks = make(map[uint32]chan Response)
+
+		this.mutop.Lock()
 		this.remoteTopics = make(map[string]bool)
+		this.mutop.Unlock()
 	}
 }
 
 func (this *Wire) Destroy() {
 	if this.OnDropTopic != nil {
-		for k := range this.remoteTopics {
+		var topics = this.cloneTopics()
+		for _, name := range topics {
 			// use trigger
-			this.OnDropTopic(TopicEvent{this, k})
+			this.OnDropTopic(TopicEvent{this, name})
 		}
 	}
 
@@ -471,10 +504,10 @@ func (this *Wire) Destroy() {
 }
 
 func (this *Wire) addRemoteTopic(name string) {
-	this.mutop.Lock()
 	if this.OnNewTopic != nil {
 		this.OnNewTopic(TopicEvent{this, name})
 	}
+	this.mutop.Lock()
 	this.remoteTopics[name] = true
 	this.mutop.Unlock()
 }
@@ -489,7 +522,7 @@ func (this *Wire) deleteRemoteTopic(name string) {
 	}
 }
 
-func (this *Wire) hasRemoteTopic(name string) bool {
+func (this *Wire) HasRemoteTopic(name string) bool {
 	this.mutop.Lock()
 	defer this.mutop.Unlock()
 
@@ -530,7 +563,7 @@ func (this *Wire) SetTimeout(timeout time.Duration) {
 func (this *Wire) Send(msg Envelope) <-chan error {
 	// check first if the peer has the topic before sending.
 	// This is done because remote topics are only available after a connection
-	if test(msg.Kind, PUB, PUSH, REQ, REQALL) && !this.hasRemoteTopic(msg.Name) {
+	if test(msg.Kind, PUB, PUSH, REQ, REQALL) && !this.HasRemoteTopic(msg.Name) {
 		msg.errch <- UnknownTopic(fmt.Errorf(UNKNOWNTOPIC, msg.Name))
 		return msg.errch
 	}
@@ -780,23 +813,11 @@ func (this *Wire) reader(c net.Conn, handlerch chan EnvelopeConn) {
 
 func handleReply(msg Envelope, responses <-chan Response) {
 	for r := range responses {
-		if msg.handler != nil {
-			// if it is the last one,
-			// the handler will take care of it
-			msg.handler(r)
-			if r.Last() {
-				// signal end of request all, canceling the timeout event
-				msg.done <- nil
-			}
-		} else if r.Kind == NACK {
-			msg.done <- NACKERROR
-		} else {
-			msg.done <- nil
-		}
+		msg.Reply(r)
 	}
 }
 
-// Executes the function that handles the request. By default the reply of this handler is allways final (REQ or ERR).
+// Executes the function that handles the request. By default the reply of this handler is allways final (REP or ERR).
 // If we wish  to send multiple replies, we must cancel the response and then send the several replies.
 func (this *Wire) runHandler(handlerch chan EnvelopeConn) {
 	for msgconn := range handlerch {
@@ -1015,20 +1036,26 @@ func CreateRequestHandler(codec Codec, fun interface{}) func(*Request) {
 	}
 
 	return func(req *Request) {
-		var p reflect.Value
 		var params = make([]reflect.Value, 0)
 		if hasContext {
 			params = append(params, reflect.ValueOf(req))
 		}
 		if payloadType != nil {
 			if codec != nil && req.payload != nil {
-				p = reflect.New(payloadType)
-				var e = codec.Decode(req.payload, p.Interface())
-				if e != nil {
-					req.SetFault(faults.Wrapf(e, "Unable to decode payload %s", req.payload))
-					return
+				var p reflect.Value
+				if payloadType.Kind() == reflect.Slice &&
+					payloadType.Elem().Kind() == reflect.Uint8 {
+					p = reflect.ValueOf(req.payload)
+				} else {
+					p = reflect.New(payloadType).Elem()
+
+					var e = codec.Decode(req.payload, p.Interface())
+					if e != nil {
+						req.SetFault(faults.Wrapf(e, "Unable to decode payload %s", req.payload))
+						return
+					}
 				}
-				params = append(params, p.Elem())
+				params = append(params, p)
 			} else {
 				// when the codec is nil the data is sent as is
 				if req.payload == nil {
@@ -1509,7 +1536,7 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 					}
 				}
 			} else {
-				this.logger.Tracef("%X: NO retry will be performed to %s!", this.uuid, this.addr)
+				this.logger.Debugf("NO retry will be performed to %s!", this.addr)
 				return
 			}
 		} else {
@@ -1517,7 +1544,7 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 		}
 	}
 
-	this.logger.Debugf("%s connected to %s", c.LocalAddr(), this.addr)
+	this.logger.Debugf("Connected to %s", this.addr)
 
 	this.muconn.Lock()
 	defer this.muconn.Unlock()
@@ -1525,7 +1552,8 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 	// topic exchange
 	err = this.handshake(c)
 	if err != nil {
-		this.logger.Errorf("%s: error while handshaking %s: %+v", c.LocalAddr(), this.addr, err)
+		//this.logger.Errorf("%s: error while handshaking %s: %+v", c.LocalAddr(), this.addr, err)
+		faults.Wrapf(err, "Error while handshaking %s", this.addr)
 		this.Wire.SetConn(nil)
 		c.Close()
 	} else {
@@ -1665,7 +1693,8 @@ type TopicListener func(event TopicEvent)
 
 type TopicEvent struct {
 	Wire *Wire
-	Name string // topic name
+	// Name is the topic name
+	Name string
 }
 
 func (e TopicEvent) String() string {
@@ -1851,11 +1880,25 @@ func (this *Wires) Add(wire *Wire) {
 
 	this.loadBalancer.Add(wire)
 
-	for k := range wire.remoteTopics {
+	var topics = wire.cloneTopics()
+	for _, name := range topics {
 		// use trigger
-		wire.OnNewTopic(TopicEvent{wire, k})
+		wire.OnNewTopic(TopicEvent{wire, name})
 	}
 	wire.mutop.RUnlock()
+}
+
+// TopicCount returns the number of clients providing the topic
+func (this *Wires) TopicCount(name string) int {
+	this.RLock()
+	var count = 0
+	for _, v := range this.wires {
+		if v.HasRemoteTopic(name) {
+			count++
+		}
+	}
+	this.RUnlock()
+	return count
 }
 
 func (this *Wires) Get(conn net.Conn) *Wire {
@@ -1915,10 +1958,10 @@ func (this *Wires) GetAll() []*Wire {
 	this.Lock()
 	defer this.Unlock()
 
-	return clone(this.wires)
+	return cloneWires(this.wires)
 }
 
-func clone(wires []*Wire) []*Wire {
+func cloneWires(wires []*Wire) []*Wire {
 	// clone
 	w := make([]*Wire, len(wires))
 	copy(w, wires)
@@ -1998,7 +2041,7 @@ func wiresTriage(msg Envelope, wires []*Wire, skipWire *Wire) ([]*Wire, error) {
 	var ws = make([]*Wire, 0)
 	for _, w := range wires {
 		// does not send to self
-		if (skipWire == nil || skipWire != w) && w.hasRemoteTopic(msg.Name) {
+		if (skipWire == nil || skipWire != w) && w.HasRemoteTopic(msg.Name) {
 			ws = append(ws, w)
 		}
 	}
@@ -2037,28 +2080,28 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 			var wires, err = wiresTriage(msg, this.wires, skipWire)
 			this.RUnlock()
 			if err != nil {
-				errch <- err
-				return
-			}
-			var size = len(wires)
-			for i := 0; i < size; i++ {
-				var w, err = this.loadBalancer.PickOne(msg, wires)
-				if err != nil {
-					errch <- err
-					return
+				defErr = err
+			} else {
+				var size = len(wires)
+				for i := 0; i < size; i++ {
+					var w, err = this.loadBalancer.PickOne(msg, wires)
+					if err != nil {
+						defErr = err
+						break
+					}
+					// REQ can also receive multiple messages from ONE replier
+					err = <-this.send(w, msg)
+					this.loadBalancer.Done(w, msg, err)
+					// exit on success
+					if err == nil {
+						defErr = nil
+						break
+					} else {
+						this.logger.Debugf("Failed to send %s to %s. Cause=%s", msg, w.Conn().RemoteAddr(), err)
+					}
 				}
-				// REQ can also receive multiple messages from ONE replier
-				err = <-this.send(w, msg)
-				this.loadBalancer.Done(w, msg, err)
-				// exit on success
-				if err == nil {
-					errch <- nil
-					return
-				} else {
-					this.logger.Debugf("Failed to send %s to %s. Cause=%s", msg, w.Conn().RemoteAddr(), err)
-				}
 			}
-			errch <- defErr
+			errch <- this.loadBalancer.AllDone(msg, defErr)
 		}()
 	} else if msg.Kind == PUB {
 		var wg sync.WaitGroup
@@ -2109,7 +2152,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 		}
 		go func() {
 			wg.Wait()
-			errch <- defErr
+			errch <- this.loadBalancer.AllDone(msg, defErr)
 		}()
 
 	} else if msg.Kind == REQALL {
@@ -2192,7 +2235,7 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 			if handler != nil {
 				handler(NewResponse(skipWire, nil, ACK, 0, nil))
 			}
-			errch <- defErr
+			errch <- this.loadBalancer.AllDone(msg, defErr)
 		}()
 	}
 
@@ -2346,6 +2389,7 @@ func (this *Server) handshake(c net.Conn, wire *Wire) (string, map[string]bool, 
 
 	wire.remoteUuid = uuid
 	wire.remoteMetadata = metadata
+	this.logger.Debugf("Remote Metadata: %v", metadata)
 
 	// send identity and local topics
 	this.muhnd.RLock()
@@ -2566,6 +2610,8 @@ type LoadBalancer interface {
 	PickAll(Envelope, []*Wire) ([]*Wire, error)
 	// Done is called when we are done with one wire
 	Done(*Wire, Envelope, error)
+	// AllDone is called when ALL wires have been processed
+	AllDone(Envelope, error) error
 }
 
 type LBPolicy interface {

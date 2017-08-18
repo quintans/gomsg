@@ -8,25 +8,34 @@ import (
 
 type Log struct{}
 
-func (l Log) IsActive(level l.LogLevel) bool {
+func (lg Log) IsActive(level l.LogLevel) bool {
 	return true
 }
 
-func (l Log) Tracef(format string, args ...interface{}) {
+func (lg Log) Tracef(format string, args ...interface{}) {
 	log.Printf(format, args...)
 }
-func (l Log) Debugf(format string, args ...interface{}) {
+
+func (lg Log) Debugf(format string, args ...interface{}) {
 	log.Printf(format, args...)
 }
-func (l Log) Infof(format string, args ...interface{}) {
+
+func (lg Log) Infof(format string, args ...interface{}) {
 	log.Printf(format, args...)
 }
-func (l Log) Warnf(format string, args ...interface{}) {
+
+func (lg Log) Warnf(format string, args ...interface{}) {
 	log.Printf(format, args...)
 }
-func (l Log) Errorf(format string, args ...interface{}) {
+
+func (lg Log) Errorf(format string, args ...interface{}) {
 	log.Printf(format, args...)
 }
-func (l Log) Fatalf(format string, args ...interface{}) {
+
+func (lg Log) Fatalf(format string, args ...interface{}) {
 	log.Printf(format, args...)
+}
+
+func (lg Log) CallerAt(depth int) l.ILogger {
+	return lg
 }

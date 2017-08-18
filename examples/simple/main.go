@@ -20,12 +20,12 @@ func main() {
 	var logger = log.LoggerFor("github.com/quintans/gmsg").SetCallerAt(2)
 	server := gomsg.NewServer()
 	server.SetDefaultTimeout(time.Second)
-	server.SetLogger(log.Wrap{logger, "{server} "})
+	server.SetLogger(log.Wrap{logger, "{server}"})
 	server.Listen(":7777")
 	wait()
 
 	cli := gomsg.NewClient()
-	cli.SetLogger(log.Wrap{logger, "{cli} "})
+	cli.SetLogger(log.Wrap{logger, "{cli}"})
 	cli.Handle("REVERSE", func(ctx *gomsg.Request, m string) (string, error) {
 		fmt.Println("<=== processing (1):", m, "from", ctx.Connection().RemoteAddr())
 		return fmt.Sprintf("[1]=%s", reverse(m)), nil

@@ -24,7 +24,7 @@ func wait() {
 
 func createClient(reply string, l log.ILogger, replies *int32) *gomsg.Client {
 	var cli = gomsg.NewClient()
-	cli.SetLogger(log.Wrap{l, fmt.Sprintf("{%s} ", reply)})
+	cli.SetLogger(log.Wrap{l, fmt.Sprintf("{%s}", reply)})
 	cli.Handle(TOPIC, func(s string) string {
 		atomic.AddInt32(replies, 1)
 		//return reply + "-" + s
@@ -37,7 +37,7 @@ func createClient(reply string, l log.ILogger, replies *int32) *gomsg.Client {
 func main() {
 	var l = log.LoggerFor("github.com/quintans/gmsg").SetCallerAt(2)
 	server := gomsg.NewServer()
-	server.SetLogger(log.Wrap{l, "{server} "})
+	server.SetLogger(log.Wrap{l, "{server}"})
 	server.SetDefaultTimeout(time.Second)
 	server.SetRateLimiterFactory(func() toolkit.Rate {
 		return toolkit.NewRateLimiter(20000)

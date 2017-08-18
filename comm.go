@@ -472,9 +472,6 @@ func (this *Wire) stop() {
 	}
 	this.conn = nil
 	if this.chin != nil {
-		this.mucb.Lock()
-		defer this.mucb.Unlock()
-
 		close(this.chin)
 		close(this.handlerch)
 
@@ -498,7 +495,10 @@ func (this *Wire) Destroy() {
 		}
 	}
 
+	this.mucb.Lock()
 	this.stop()
+	this.mucb.Unlock()
+
 	this.OnNewTopic = nil
 	this.OnDropTopic = nil
 }
@@ -523,8 +523,8 @@ func (this *Wire) deleteRemoteTopic(name string) {
 }
 
 func (this *Wire) HasRemoteTopic(name string) bool {
-	this.mutop.Lock()
-	defer this.mutop.Unlock()
+	this.mutop.RLock()
+	defer this.mutop.RUnlock()
 
 	for k := range this.remoteTopics {
 		if strings.HasSuffix(k, FILTER_TOKEN) {
@@ -1384,11 +1384,12 @@ func (this *Client) handshake(c net.Conn) error {
 	this.Wire.remoteUuid = uuid
 	this.Wire.remoteTopics = remoteTopics
 	this.Wire.remoteMetadata = metadata
+	this.Wire.remoteGroupID = group
+	this.Wire.mutop.Unlock()
+
 	for k := range remoteTopics {
 		this.fireNewTopicListeners(TopicEvent{this.Wire, k})
 	}
-	this.Wire.remoteGroupID = group
-	this.Wire.mutop.Unlock()
 
 	return nil
 }
@@ -1553,7 +1554,7 @@ func (this *Client) dial(retry time.Duration, cherr chan error) {
 	err = this.handshake(c)
 	if err != nil {
 		//this.logger.Errorf("%s: error while handshaking %s: %+v", c.LocalAddr(), this.addr, err)
-		faults.Wrapf(err, "Error while handshaking %s", this.addr)
+		err = faults.Wrapf(err, "Error while handshaking %s", this.addr)
 		this.Wire.SetConn(nil)
 		c.Close()
 	} else {
@@ -1816,7 +1817,7 @@ func (this *Wires) SetCodec(codec Codec) *Wires {
 	this.codec = codec
 	for _, v := range this.wires {
 		v.codec = codec
-		v.Destroy()
+		//v.Destroy()
 	}
 
 	return this
@@ -1862,7 +1863,6 @@ func (this *Wires) Add(wire *Wire) {
 
 	this.Unlock()
 
-	wire.mutop.RLock()
 	// set common codec
 	wire.codec = this.codec
 	if this.rateLimiterFactory != nil {
@@ -1885,7 +1885,6 @@ func (this *Wires) Add(wire *Wire) {
 		// use trigger
 		wire.OnNewTopic(TopicEvent{wire, name})
 	}
-	wire.mutop.RUnlock()
 }
 
 // TopicCount returns the number of clients providing the topic
@@ -1921,10 +1920,9 @@ func (this *Wires) Find(fn func(w *Wire) bool) *Wire {
 
 func (this *Wires) Kill(conn net.Conn) {
 	this.Lock()
-	defer this.Unlock()
-
 	var w *Wire
 	this.wires, w = remove(conn, this.wires)
+	this.Unlock()
 
 	if w != nil {
 		this.loadBalancer.Remove(w)
@@ -1935,7 +1933,6 @@ func (this *Wires) Kill(conn net.Conn) {
 		}
 		w.Destroy()
 	}
-
 }
 
 func remove(conn net.Conn, wires []*Wire) ([]*Wire, *Wire) {
@@ -2332,8 +2329,8 @@ func (this *Server) Listen(service string) <-chan error {
 			wire.findHandlers = this.findHandlers
 
 			// topic exchange
+			this.logger.Debugf("%s: accepted connection from %s", l.Addr(), c.RemoteAddr())
 			group, remoteTopics, err := this.handshake(c, wire)
-			this.logger.Tracef("%s: accepted connection from %s", l.Addr(), c.RemoteAddr())
 
 			if err != nil {
 				this.logger.Errorf("Failed to handshake. Rejecting connection: %+v", err)

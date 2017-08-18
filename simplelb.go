@@ -10,51 +10,68 @@ import (
 var _ LBPolicy = &HysteresisPolicy{}
 
 type HysteresisPolicy struct {
-	MaxFailures     int
+	data         map[string]*HysteresisPolicyData
+	MaxFailures  int
+	MinSuccesses int
+	Quarantine   time.Duration
+}
+type HysteresisPolicyData struct {
 	failures        int
-	MinSuccesses    int
 	successes       int
-	Quarantine      time.Duration
 	quarantineUntil time.Time
 	load            uint64
 }
 
+func (this *HysteresisPolicy) getData(name string) *HysteresisPolicyData {
+	var data = this.data[name]
+	if data == nil {
+		data = &HysteresisPolicyData{}
+		this.data[name] = data
+	}
+	return data
+}
+
 func (this *HysteresisPolicy) IncLoad(name string) uint64 {
-	this.load++
-	return this.load
+	var data = this.getData(name)
+	data.load++
+
+	return data.load
 }
 
 func (this *HysteresisPolicy) Load(name string) uint64 {
-	return this.load
+	return this.getData(name).load
 }
 
 func (this *HysteresisPolicy) Failed(name string) {
-	if this.failures >= this.MaxFailures {
+	var data = this.getData(name)
+	if data.failures >= this.MaxFailures {
 		// OPEN
-		this.successes = 0
-		this.quarantineUntil = time.Now().Add(this.Quarantine)
+		data.successes = 0
+		data.quarantineUntil = time.Now().Add(this.Quarantine)
 		return
 	}
 
-	this.successes = 0
-	this.failures++
+	data.successes = 0
+	data.failures++
 }
 
-func (this *HysteresisPolicy) Succeeded(string) {
-	if this.successes >= this.MinSuccesses {
+func (this *HysteresisPolicy) Succeeded(name string) {
+	var data = this.getData(name)
+	if data.successes >= this.MinSuccesses {
 		// CLOSE
-		this.failures = 0
+		data.failures = 0
 		return
 	}
-	if this.failures < this.MaxFailures {
+	if data.failures < this.MaxFailures {
 		// not OPEN
-		this.failures = 0
+		data.failures = 0
 	}
-	this.successes++
+	data.successes++
 }
 
-func (this *HysteresisPolicy) InQuarantine(string) bool {
-	return time.Now().Before(this.quarantineUntil)
+func (this *HysteresisPolicy) InQuarantine(name string) bool {
+	var data = this.getData(name)
+	return time.Now().Before(data.quarantineUntil)
 }
 
 var _ LoadBalancer = SimpleLB{}
@@ -72,6 +89,7 @@ func NewSimpleLB() SimpleLB {
 			return &HysteresisPolicy{
 				Quarantine:  time.Second * 10,
 				MaxFailures: 3,
+				data:        make(map[string]*HysteresisPolicyData),
 			}
 		},
 	}
@@ -95,6 +113,10 @@ func (lb SimpleLB) Remove(w *Wire) {
 	lb.Unstick(w)
 }
 
+func (lb SimpleLB) AllDone(msg Envelope, err error) error {
+	return err
+}
+
 func (lb SimpleLB) Done(w *Wire, msg Envelope, err error) {
 	if err == nil {
 		w.Policy.Succeeded(msg.Name)
@@ -109,8 +131,8 @@ func (lb SimpleLB) Done(w *Wire, msg Envelope, err error) {
 		w.Policy.Failed(msg.Name)
 
 		lb.Lock()
-		defer lb.Unlock()
 		lb.Unstick(w)
+		lb.Unlock()
 	}
 }
 

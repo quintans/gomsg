@@ -73,6 +73,10 @@ func (lb RoundRobinLB) Remove(w *Wire) {
 	lb.Unstick(w)
 }
 
+func (lb RoundRobinLB) AllDone(msg Envelope, err error) error {
+	return err
+}
+
 func (lb RoundRobinLB) Done(w *Wire, msg Envelope, err error) {
 	if err != nil {
 		w.Policy.Failed(msg.Name)

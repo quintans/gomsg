@@ -66,11 +66,10 @@ func (lb RoundRobinLB) Add(w *Wire) {
 
 // Remove removes wire from load balancer
 func (lb RoundRobinLB) Remove(w *Wire) {
-	w.Policy = nil
-
 	lb.Lock()
-	defer lb.Unlock()
+	//w.Policy = nil
 	lb.Unstick(w)
+	lb.Unlock()
 }
 
 func (lb RoundRobinLB) AllDone(msg Envelope, err error) error {

@@ -101,16 +101,17 @@ func (lb SimpleLB) SetPolicyFactory(factory func() LBPolicy) {
 
 // Add adds wire to load balancer
 func (lb SimpleLB) Add(w *Wire) {
+	lb.Lock()
 	w.Policy = lb.policyFactory()
+	lb.Unlock()
 }
 
 // Remove removes wire from load balancer
 func (lb SimpleLB) Remove(w *Wire) {
-	w.Policy = nil
-
 	lb.Lock()
-	defer lb.Unlock()
+	//w.Policy = nil
 	lb.Unstick(w)
+	lb.Unlock()
 }
 
 func (lb SimpleLB) AllDone(msg Envelope, err error) error {

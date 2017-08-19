@@ -83,6 +83,7 @@ var kind_labels = [...]string{
 type EKind uint8
 
 const noGROUP = ""
+const defTimeout = time.Second * 20
 
 func (this EKind) String() string {
 	idx := int(this)
@@ -403,7 +404,7 @@ type Wire struct {
 func NewWire(codec Codec, l log.ILogger) *Wire {
 	wire := &Wire{
 		callbacks:    make(map[uint32]chan Response),
-		timeout:      time.Second * 20,
+		timeout:      defTimeout,
 		codec:        codec,
 		remoteTopics: make(map[string]bool),
 		bufferSize:   1000,
@@ -1223,12 +1224,12 @@ type Client struct {
 func NewClient() *Client {
 	this := &Client{
 		reconnectInterval:    time.Millisecond * 10,
-		reconnectMaxInterval: time.Second,
+		reconnectMaxInterval: time.Second * 3,
 		Wire:                 NewWire(JsonCodec{}, Log{}),
 		sendListeners:        make(map[uint64]SendListener),
 		newTopicListeners:    make(map[uint64]TopicListener),
 		dropTopicListeners:   make(map[uint64]TopicListener),
-		defaultTimeout:       time.Second * 5,
+		defaultTimeout:       defTimeout,
 	}
 	this.ClientServer = NewClientServer()
 
@@ -1715,7 +1716,7 @@ func NewWires(codec Codec, l log.ILogger) *Wires {
 		dropTopicListeners: make(map[uint64]TopicListener),
 		loadBalancer:       NewSimpleLB(),
 		bufferSize:         1000,
-		defaultTimeout:     time.Second * 5,
+		defaultTimeout:     defTimeout,
 		logger:             Log{},
 	}
 }
@@ -1819,7 +1820,6 @@ func (this *Wires) SetCodec(codec Codec) *Wires {
 	this.codec = codec
 	for _, v := range this.wires {
 		v.codec = codec
-		//v.Destroy()
 	}
 
 	return this
@@ -1977,7 +1977,7 @@ func (this *Wires) Size() int {
 // Request sends a message and waits for the reply
 // If the type of the payload is *mybus.Msg it will ignore encoding and use the internal bytes as the payload. This is useful if we want to implement a broker.
 func (this *Wires) Request(name string, payload interface{}, handler interface{}) <-chan error {
-	return this.Send(REQ, name, payload, handler, time.Second)
+	return this.Send(REQ, name, payload, handler, this.defaultTimeout)
 }
 
 // RequestTimeout sends a message and waits for the reply
@@ -2003,7 +2003,7 @@ func (this *Wires) Push(name string, payload interface{}) <-chan error {
 }
 
 func (this *Wires) PushTimeout(name string, payload interface{}, timeout time.Duration) <-chan error {
-	return this.Send(PUSH, name, payload, nil, time.Second)
+	return this.Send(PUSH, name, payload, nil, timeout)
 }
 
 // Publish sends a message without any reply

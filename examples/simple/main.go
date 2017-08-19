@@ -28,7 +28,7 @@ func main() {
 	cli.SetLogger(log.Wrap{logger, "{cli}"})
 	cli.Handle("REVERSE", func(ctx *gomsg.Request, m string) (string, error) {
 		fmt.Println("<=== processing (1):", m, "from", ctx.Connection().RemoteAddr())
-		return fmt.Sprintf("[1]=%s", reverse(m)), nil
+		return reverse(m), nil
 	})
 	var err = <-cli.Connect("localhost:7777")
 	if err != nil {
@@ -36,34 +36,19 @@ func main() {
 	}
 	wait()
 
-	/*
-		cli2 := gomsg.NewClient()
-		cli2.Handle("REVERSE", func(ctx *gomsg.Request, m string) (string, error) {
-			fmt.Println("<=== processing (2):", m, "from", ctx.Connection().RemoteAddr())
-			return fmt.Sprintf("[2]=%s", reverse(m)), nil
-		})
-		cli2.Connect("localhost:7777")
-
-		// just to get in the way
-		cli3 := gomsg.NewClient()
-		cli3.Connect("localhost:7777")
-	*/
-
-	// ===============
-
 	//time.Sleep(time.Millisecond * 100)
 	fmt.Println("====> requesting...")
+	var reply string
 	err = <-server.Request("REVERSE", "hello", func(ctx gomsg.Response, r string) {
+		reply = r
 		fmt.Println("===> reply:", r)
 	})
 	if err != nil {
 		fmt.Println("===> ERROR:", err)
 	}
-	/*
-		server.RequestAll("REVERSE", "hello", func(ctx gomsg.Response, r string) {
-			fmt.Println("===> reply:", ctx.Kind, r)
-		}, time.Second)
-	*/
+	if reply != "olleh" {
+		fmt.Println("ERROR: Expected \"olleh\", got", reply)
+	}
 
 	wait()
 	fmt.Println("I: close...")

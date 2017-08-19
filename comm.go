@@ -995,7 +995,7 @@ func CreateResponseHandler(codec Codec, fun interface{}) func(Response) {
 
 }
 
-func CreateRequestHandler(codec Codec, fun interface{}) func(*Request) {
+func CreateRequestHandler(codec Codec, fun interface{}, logger log.ILogger) func(*Request) {
 	if f, ok := fun.(func(*Request)); ok {
 		return f
 	}
@@ -1046,16 +1046,18 @@ func CreateRequestHandler(codec Codec, fun interface{}) func(*Request) {
 				if payloadType.Kind() == reflect.Slice &&
 					payloadType.Elem().Kind() == reflect.Uint8 {
 					p = reflect.ValueOf(req.payload)
+					params = append(params, p)
 				} else {
-					p = reflect.New(payloadType).Elem()
+					p = reflect.New(payloadType)
 
 					var e = codec.Decode(req.payload, p.Interface())
 					if e != nil {
 						req.SetFault(faults.Wrapf(e, "Unable to decode payload %s", req.payload))
+						logger.Errorf("Unable to decode payload %s", req.payload)
 						return
 					}
+					params = append(params, p.Elem())
 				}
-				params = append(params, p)
 			} else {
 				// when the codec is nil the data is sent as is
 				if req.payload == nil {
@@ -1579,7 +1581,7 @@ func (this *Client) Handle(name string, middlewares ...interface{}) {
 	var size = len(middlewares)
 	var hnds = make([]Middleware, size)
 	for i := 0; i < size; i++ {
-		hnds[i] = CreateRequestHandler(this.Wire.codec, middlewares[i])
+		hnds[i] = CreateRequestHandler(this.Wire.codec, middlewares[i], this.logger)
 	}
 	this.addHandler(name, hnds)
 
@@ -2455,7 +2457,7 @@ func (this *Server) Handle(name string, middlewares ...interface{}) {
 	var size = len(middlewares)
 	var hnds = make([]Middleware, size)
 	for i := 0; i < size; i++ {
-		hnds[i] = CreateRequestHandler(this.codec, middlewares[i])
+		hnds[i] = CreateRequestHandler(this.codec, middlewares[i], this.logger)
 	}
 	this.addHandler(name, hnds)
 

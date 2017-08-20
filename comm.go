@@ -383,15 +383,16 @@ type Wire struct {
 	disconnect   func(net.Conn, error)
 	findHandlers func(name string) []handler
 
-	mutop          sync.RWMutex
-	remoteGroupID  string // it is used for High Availability
-	localGroupID   string // it is used for High Availability
-	remoteUuid     tk.UUID
-	remoteTopics   map[string]bool
-	remoteMetadata map[string]interface{}
-	OnSend         SendListener
-	OnNewTopic     TopicListener
-	OnDropTopic    TopicListener
+	mu                 sync.RWMutex
+	remoteGroupID      string // it is used for High Availability
+	localGroupID       string // it is used for High Availability
+	remoteUuid         tk.UUID
+	remoteTopics       map[string]bool
+	remoteMetadata     map[string]interface{}
+	sendListeners      map[uint64]SendListener
+	newTopicListeners  map[uint64]TopicListener
+	dropTopicListeners map[uint64]TopicListener
+	listenersIdx       uint64
 
 	// load balancer failure policy
 	Policy LBPolicy
@@ -403,26 +404,123 @@ type Wire struct {
 
 func NewWire(codec Codec, l log.ILogger) *Wire {
 	wire := &Wire{
-		callbacks:    make(map[uint32]chan Response),
-		timeout:      defTimeout,
-		codec:        codec,
-		remoteTopics: make(map[string]bool),
-		bufferSize:   1000,
-		logger:       l,
+		timeout:    defTimeout,
+		codec:      codec,
+		bufferSize: 1000,
+		logger:     l,
 	}
-
+	wire.reset()
 	return wire
 }
 
+func (this *Wire) reset() {
+	this.callbacks = make(map[uint32]chan Response)
+	this.remoteTopics = make(map[string]bool)
+	this.sendListeners = make(map[uint64]SendListener)
+	this.newTopicListeners = make(map[uint64]TopicListener)
+	this.dropTopicListeners = make(map[uint64]TopicListener)
+	this.listenersIdx = 0
+}
+
+// AddSendListener adds a listener on send messages (Publis/Push/RequestAll/Request)
+func (this *Wire) AddSendListener(listener SendListener) uint64 {
+	this.mu.Lock()
+	defer this.mu.Unlock()
+	this.listenersIdx++
+	this.sendListeners[this.listenersIdx] = listener
+	return this.listenersIdx
+}
+
+// RemoveSendListener removes a previously added listener on send messages
+func (this *Wire) RemoveSendListener(idx uint64) {
+	this.mu.Lock()
+	delete(this.sendListeners, idx)
+	this.mu.Unlock()
+}
+
+func (this *Wire) fireSendListeners(event SendEvent) {
+	for _, listener := range cloneSendListeners(this.mu, this.sendListeners) {
+		listener(event)
+	}
+}
+
+func cloneSendListeners(mu sync.RWMutex, m map[uint64]SendListener) []SendListener {
+	mu.RLock()
+	arr := make([]SendListener, len(m))
+	var i = 0
+	for _, v := range m {
+		arr[i] = v
+		i++
+	}
+	mu.RUnlock()
+
+	return arr
+}
+
+func (this *Wire) AddNewTopicListener(listener TopicListener) uint64 {
+	this.mu.Lock()
+	defer this.mu.Unlock()
+	this.listenersIdx++
+	this.newTopicListeners[this.listenersIdx] = listener
+	return this.listenersIdx
+}
+
+// RemoveSendListener removes a previously added listener on send messages
+func (this *Wire) RemoveNewTopicListener(idx uint64) {
+	this.mu.Lock()
+	delete(this.newTopicListeners, idx)
+	this.mu.Unlock()
+}
+
+func (this *Wire) fireNewTopicListeners(event TopicEvent) {
+	for _, listener := range cloneListeners(this.mu, this.newTopicListeners) {
+		listener(event)
+	}
+}
+
+func (this *Wire) AddDropTopicListener(listener TopicListener) uint64 {
+	this.mu.Lock()
+	defer this.mu.Unlock()
+	this.listenersIdx++
+	this.dropTopicListeners[this.listenersIdx] = listener
+	return this.listenersIdx
+}
+
+// RemoveSendListener removes a previously added listener on send messages
+func (this *Wire) RemoveDropTopicListener(idx uint64) {
+	this.mu.Lock()
+	delete(this.dropTopicListeners, idx)
+	this.mu.Unlock()
+}
+
+func (this *Wire) fireDropTopicListeners(event TopicEvent) {
+	for _, listener := range cloneListeners(this.mu, this.dropTopicListeners) {
+		listener(event)
+	}
+}
+
+func cloneListeners(mu sync.RWMutex, m map[uint64]TopicListener) []TopicListener {
+	mu.RLock()
+	arr := make([]TopicListener, len(m))
+	var i = 0
+	for _, v := range m {
+		arr[i] = v
+		i++
+	}
+	mu.RUnlock()
+
+	return arr
+}
+
 func (this *Wire) cloneTopics() []string {
-	this.mutop.RLock()
+	this.mu.RLock()
 	tps := make([]string, len(this.remoteTopics))
 	var i = 0
 	for k := range this.remoteTopics {
 		tps[i] = k
 		i++
 	}
-	this.mutop.RUnlock()
+	this.mu.RUnlock()
 
 	return tps
 }
@@ -453,8 +551,8 @@ func (this *Wire) Conn() net.Conn {
 }
 
 func (this *Wire) SetConn(c net.Conn) {
-	this.mucb.Lock()
-	defer this.mucb.Unlock()
+	this.mu.Lock()
+	defer this.mu.Unlock()
 
 	this.stop()
 	if c != nil {
@@ -478,54 +576,40 @@ func (this *Wire) stop() {
 
 		this.chin = nil
 		this.handlerch = nil
-
-		this.callbacks = make(map[uint32]chan Response)
-
-		this.mutop.Lock()
-		this.remoteTopics = make(map[string]bool)
-		this.mutop.Unlock()
 	}
+	this.reset()
 }
 
 func (this *Wire) Destroy() {
-	if this.OnDropTopic != nil {
-		var topics = this.cloneTopics()
-		for _, name := range topics {
-			// use trigger
-			this.OnDropTopic(TopicEvent{this, name})
-		}
+	var topics = this.cloneTopics()
+	for _, name := range topics {
+		this.fireDropTopicListeners(TopicEvent{this, name})
 	}
 
-	this.mucb.Lock()
+	this.mu.Lock()
 	this.stop()
-	this.mucb.Unlock()
-
-	this.OnNewTopic = nil
-	this.OnDropTopic = nil
+	this.mu.Unlock()
 }
 
 func (this *Wire) addRemoteTopic(name string) {
-	if this.OnNewTopic != nil {
-		this.OnNewTopic(TopicEvent{this, name})
-	}
-	this.mutop.Lock()
+	this.fireNewTopicListeners(TopicEvent{this, name})
+
+	this.mu.Lock()
 	this.remoteTopics[name] = true
-	this.mutop.Unlock()
+	this.mu.Unlock()
 }
 
 func (this *Wire) deleteRemoteTopic(name string) {
-	this.mutop.Lock()
+	this.mu.Lock()
 	delete(this.remoteTopics, name)
-	this.mutop.Unlock()
+	this.mu.Unlock()
 
-	if this.OnDropTopic != nil {
-		this.OnDropTopic(TopicEvent{this, name})
-	}
+	this.fireDropTopicListeners(TopicEvent{this, name})
 }
 
 func (this *Wire) HasRemoteTopic(name string) bool {
-	this.mutop.RLock()
-	defer this.mutop.RUnlock()
+	this.mu.RLock()
+	defer this.mu.RUnlock()
 
 	for k := range this.remoteTopics {
 		if strings.HasSuffix(k, FILTER_TOKEN) {
@@ -540,8 +624,8 @@ func (this *Wire) HasRemoteTopic(name string) bool {
 }
 
 func (this *Wire) getCallback(seq uint32, last bool) chan Response {
-	this.mucb.Lock()
-	defer this.mucb.Unlock()
+	this.mu.Lock()
+	defer this.mu.Unlock()
 
 	var msg = this.callbacks[seq]
 	if last {
@@ -551,8 +635,8 @@ func (this *Wire) getCallback(seq uint32, last bool) chan Response {
 }
 
 func (this *Wire) delCallback(seq uint32) {
-	this.mucb.Lock()
-	defer this.mucb.Unlock()
+	this.mu.Lock()
+	defer this.mu.Unlock()
 
 	delete(this.callbacks, seq)
 }
@@ -569,14 +653,12 @@ func (this *Wire) Send(msg Envelope) <-chan error {
 		return msg.errch
 	}
 
-	if this.OnSend != nil {
-		this.OnSend(SendEvent{
-			Kind:    msg.Kind,
-			Name:    msg.Name,
-			Payload: msg.Payload,
-			Handler: msg.handler,
-		})
-	}
+	this.fireSendListeners(SendEvent{
+		Kind:    msg.Kind,
+		Name:    msg.Name,
+		Payload: msg.Payload,
+		Handler: msg.handler,
+	})
 
 	return this.sendit(msg)
 }
@@ -593,8 +675,8 @@ func (this *Wire) sendit(msg Envelope) <-chan error {
 }
 
 func (this *Wire) enqueue(msg Envelope) {
-	this.mucb.Lock()
-	defer this.mucb.Unlock()
+	this.mu.Lock()
+	defer this.mu.Unlock()
 
 	if this.chin != nil {
 		// every call will have a new channel, specially when doing REQALL
@@ -1213,10 +1295,6 @@ type Client struct {
 	addr                 string
 	reconnectInterval    time.Duration
 	reconnectMaxInterval time.Duration
-	sendListeners        map[uint64]SendListener
-	newTopicListeners    map[uint64]TopicListener
-	dropTopicListeners   map[uint64]TopicListener
-	listenersIdx         uint64
 	defaultTimeout       time.Duration
 }
 
@@ -1226,9 +1304,6 @@ func NewClient() *Client {
 		reconnectInterval:    time.Millisecond * 10,
 		reconnectMaxInterval: time.Second * 3,
 		Wire:                 NewWire(JsonCodec{}, Log{}),
-		sendListeners:        make(map[uint64]SendListener),
-		newTopicListeners:    make(map[uint64]TopicListener),
-		dropTopicListeners:   make(map[uint64]TopicListener),
 		defaultTimeout:       defTimeout,
 	}
 	this.ClientServer = NewClientServer()
@@ -1270,73 +1345,6 @@ func NewClient() *Client {
 
 func (this *Client) SetDefaultTimeout(timeout time.Duration) {
 	this.defaultTimeout = timeout
-}
-
-// AddSendListener adds a listener on send messages (Publis/Push/RequestAll/Request)
-func (this *Client) AddSendListener(listener SendListener) uint64 {
-	if this.Wire.OnSend == nil {
-		this.Wire.OnSend = func(event SendEvent) {
-			this.fireSendListeners(event)
-		}
-	}
-	var idx = atomic.AddUint64(&this.listenersIdx, 1)
-	this.sendListeners[idx] = listener
-	return idx
-}
-
-// RemoveSendListener removes a previously added listener on send messages
-func (this *Client) RemoveSendListener(idx uint64) {
-	delete(this.sendListeners, idx)
-}
-
-func (this *Client) fireSendListeners(event SendEvent) {
-	for _, listener := range this.sendListeners {
-		listener(event)
-	}
-}
-
-func (this *Client) AddNewTopicListener(listener TopicListener) uint64 {
-	if this.Wire.OnNewTopic == nil {
-		this.Wire.OnNewTopic = func(event TopicEvent) {
-			this.fireNewTopicListeners(event)
-		}
-	}
-	var idx = atomic.AddUint64(&this.listenersIdx, 1)
-	this.newTopicListeners[idx] = listener
-	return idx
-}
-
-// RemoveSendListener removes a previously added listener on send messages
-func (this *Client) RemoveNewTopicListener(idx uint64) {
-	delete(this.newTopicListeners, idx)
-}
-
-func (this *Client) fireNewTopicListeners(event TopicEvent) {
-	for _, listener := range this.newTopicListeners {
-		listener(event)
-	}
-}
-
-func (this *Client) AddDropTopicListener(listener TopicListener) uint64 {
-	if this.Wire.OnDropTopic == nil {
-		this.Wire.OnDropTopic = func(event TopicEvent) {
-			this.fireDropTopicListener(event)
-		}
-	}
-	var idx = atomic.AddUint64(&this.listenersIdx, 1)
-	this.dropTopicListeners[idx] = listener
-	return idx
-}
-
-// RemoveSendListener removes a previously added listener on send messages
-func (this *Client) RemoveDropTopicListener(idx uint64) {
-	delete(this.dropTopicListeners, idx)
-}
-
-func (this *Client) fireDropTopicListener(event TopicEvent) {
-	for _, listener := range this.dropTopicListeners {
-		listener(event)
-	}
 }
 
 func (this *Client) SetReconnectInterval(reconnectInterval time.Duration) *Client {
@@ -1383,12 +1391,12 @@ func (this *Client) handshake(c net.Conn) error {
 	if err != nil {
 		return err
 	}
-	this.Wire.mutop.Lock()
+	this.Wire.mu.Lock()
 	this.Wire.remoteUuid = uuid
 	this.Wire.remoteTopics = remoteTopics
 	this.Wire.remoteMetadata = metadata
 	this.Wire.remoteGroupID = group
-	this.Wire.mutop.Unlock()
+	this.Wire.mu.Unlock()
 
 	for k := range remoteTopics {
 		this.fireNewTopicListeners(TopicEvent{this.Wire, k})
@@ -1707,18 +1715,25 @@ func (e TopicEvent) String() string {
 
 // NewWires creates a Wires structure
 func NewWires(codec Codec, l log.ILogger) *Wires {
-	return &Wires{
-		wires:              make([]*Wire, 0),
-		groups:             make(map[string][]*Wire),
-		codec:              codec,
-		sendListeners:      make(map[uint64]SendListener),
-		newTopicListeners:  make(map[uint64]TopicListener),
-		dropTopicListeners: make(map[uint64]TopicListener),
-		loadBalancer:       NewSimpleLB(),
-		bufferSize:         1000,
-		defaultTimeout:     defTimeout,
-		logger:             Log{},
+	var wires = &Wires{
+		codec:          codec,
+		loadBalancer:   NewSimpleLB(),
+		bufferSize:     1000,
+		defaultTimeout: defTimeout,
+		logger:         Log{},
 	}
+	wires.reset()
+	return wires
+}
+
+func (this *Wires) reset() {
+	this.wires = make([]*Wire, 0)
+	this.groups = make(map[string][]*Wire)
+	this.sendListeners = make(map[uint64]SendListener)
+	this.newTopicListeners = make(map[uint64]TopicListener)
+	this.dropTopicListeners = make(map[uint64]TopicListener)
+	this.cursor = 0
+	this.listenersIdx = 0
 }
 
 func (this *Wires) SetLogger(l log.ILogger) {
@@ -1735,18 +1750,23 @@ func (this *Wires) SetDefaultTimeout(timeout time.Duration) {
 
 // AddSendListener adds a listener on send messages (Publis/Push/RequestAll/Request)
 func (this *Wires) AddSendListener(listener SendListener) uint64 {
-	var idx = atomic.AddUint64(&this.listenersIdx, 1)
-	this.sendListeners[idx] = listener
-	return idx
+	this.Lock()
+	defer this.Unlock()
+
+	this.listenersIdx++
+	this.sendListeners[this.listenersIdx] = listener
+	return this.listenersIdx
 }
 
 // RemoveSendListener removes a previously added listener on send messages
 func (this *Wires) RemoveSendListener(idx uint64) {
+	this.Lock()
 	delete(this.sendListeners, idx)
+	this.Unlock()
 }
 
 func (this *Wires) fireSendListener(event SendEvent) {
-	for _, listener := range this.sendListeners {
+	for _, listener := range cloneSendListeners(this.RWMutex, this.sendListeners) {
 		listener(event)
 	}
 }
@@ -1755,21 +1775,20 @@ func (this *Wires) AddNewTopicListener(listener TopicListener) uint64 {
 	this.Lock()
 	defer this.Unlock()
 
-	var idx = atomic.AddUint64(&this.listenersIdx, 1)
-	this.newTopicListeners[idx] = listener
-	return idx
+	this.listenersIdx++
+	this.newTopicListeners[this.listenersIdx] = listener
+	return this.listenersIdx
 }
 
 // RemoveSendListener removes a previously added listener on send messages
 func (this *Wires) RemoveNewTopicListener(idx uint64) {
 	this.Lock()
-	defer this.Unlock()
-
 	delete(this.newTopicListeners, idx)
+	this.Unlock()
 }
 
 func (this *Wires) fireNewTopicListener(event TopicEvent) {
-	for _, listener := range this.newTopicListeners {
+	for _, listener := range cloneListeners(this.RWMutex, this.newTopicListeners) {
 		listener(event)
 	}
 }
@@ -1778,9 +1797,9 @@ func (this *Wires) AddDropTopicListener(listener TopicListener) uint64 {
 	this.Lock()
 	defer this.Unlock()
 
-	var idx = atomic.AddUint64(&this.listenersIdx, 1)
-	this.dropTopicListeners[idx] = listener
-	return idx
+	this.listenersIdx++
+	this.dropTopicListeners[this.listenersIdx] = listener
+	return this.listenersIdx
 }
 
 // RemoveSendListener removes a previously added listener on send messages
@@ -1792,7 +1811,7 @@ func (this *Wires) RemoveDropTopicListener(idx uint64) {
 }
 
 func (this *Wires) fireDropTopicListener(event TopicEvent) {
-	for _, listener := range this.dropTopicListeners {
+	for _, listener := range cloneListeners(this.RWMutex, this.dropTopicListeners) {
 		listener(event)
 	}
 }
@@ -1836,13 +1855,7 @@ func (this *Wires) Destroy() {
 	for _, v := range this.wires {
 		v.Destroy()
 	}
-	this.wires = make([]*Wire, 0)
-	this.groups = make(map[string][]*Wire)
-	this.sendListeners = make(map[uint64]SendListener)
-	this.newTopicListeners = make(map[uint64]TopicListener)
-	this.dropTopicListeners = make(map[uint64]TopicListener)
-	atomic.StoreUint64(&this.listenersIdx, 0)
-	this.cursor = 0
+	this.reset()
 }
 
 func (this *Wires) Add(wire *Wire) {
@@ -1872,20 +1885,19 @@ func (this *Wires) Add(wire *Wire) {
 	}
 
 	// define trigger on new topic
-	wire.OnNewTopic = func(event TopicEvent) {
+	wire.AddNewTopicListener(func(event TopicEvent) {
 		this.fireNewTopicListener(event)
-	}
+	})
 	// define trigger on drop topic
-	wire.OnDropTopic = func(event TopicEvent) {
+	wire.AddDropTopicListener(func(event TopicEvent) {
 		this.fireDropTopicListener(event)
-	}
+	})
 
 	this.loadBalancer.Add(wire)
 
 	var topics = wire.cloneTopics()
 	for _, name := range topics {
-		// use trigger
-		wire.OnNewTopic(TopicEvent{wire, name})
+		wire.fireNewTopicListeners(TopicEvent{wire, name})
 	}
 }
 

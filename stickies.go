@@ -62,7 +62,7 @@ func (st Stickies) IsSticky(name string, wires []*Wire) (*Wire, *Sticky) {
 	// find last used wire
 	for _, v := range wires {
 		if v == stick.lastWire {
-			if !v.Policy.InQuarantine(name) {
+			if !v.Policy.Quarantined(name) {
 				return v, stick
 			} else {
 				break

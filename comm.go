@@ -885,7 +885,7 @@ func (this *Wire) reader(c net.Conn, handlerch chan EnvelopeConn) {
 			if respch != nil {
 				respch <- NewResponse(this, c, kind, seq, data)
 			} else {
-				this.logger.Errorf("No callback found in %s for kind=%s, sequence=%d.", this.conn.LocalAddr(), kind, seq)
+				this.logger.Warnf("No callback found in %s for kind=%s, sequence=%d.", this.conn.LocalAddr(), kind, seq)
 			}
 		}
 	}
@@ -2100,9 +2100,10 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 						defErr = err
 						break
 					}
+					var wired = this.loadBalancer.Use(w, msg)
 					// REQ can also receive multiple messages from ONE replier
 					err = <-this.send(w, msg)
-					this.loadBalancer.Done(w, msg, err)
+					this.loadBalancer.Done(wired, msg, err)
 					// exit on success
 					if err == nil {
 						defErr = nil
@@ -2129,8 +2130,9 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 				wg.Add(1)
 				go func() {
 					for _, w := range ws {
+						var wired = this.loadBalancer.Use(w, msg)
 						var e = <-this.send(w, msg)
-						this.loadBalancer.Done(w, msg, e)
+						this.loadBalancer.Done(wired, msg, e)
 						if err == nil {
 							// At least one got through.
 							// Ignoring all errors
@@ -2145,8 +2147,9 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 				wg.Add(1)
 				go func(wires []*Wire) {
 					for _, w := range wires {
+						var wired = this.loadBalancer.Use(w, msg)
 						var err = <-this.send(w, msg)
-						this.loadBalancer.Done(w, msg, err)
+						this.loadBalancer.Done(wired, msg, err)
 						// send only to one.
 						// stop if there was a success.
 						if err == nil {
@@ -2205,8 +2208,9 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 					wg.Add(1)
 					go func(w *Wire) {
 						// waits for the request completion
+						var wired = this.loadBalancer.Use(w, msg)
 						var e = <-this.send(w, msg)
-						this.loadBalancer.Done(w, msg, e)
+						this.loadBalancer.Done(wired, msg, e)
 						if e == nil {
 							// at least one got through
 							// Ignoring errors
@@ -2223,11 +2227,12 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 				go func(wires []*Wire) {
 					for _, w := range ws {
 						this.logger.Tracef("sending message to %s (group %s)", w.Conn().RemoteAddr(), id)
+						var wired = this.loadBalancer.Use(w, msg)
 						// waits for the request completion
 						e := <-this.send(w, msg)
 						// send only to one.
 						// stop if there was a success.
-						this.loadBalancer.Done(w, msg, e)
+						this.loadBalancer.Done(wired, msg, e)
 						if e == nil {
 							// Ignoring errors
 							defErr = nil
@@ -2609,6 +2614,10 @@ func isClosed(e error) bool {
 	return false
 }
 
+type Wirer interface {
+	Wire() *Wire
+}
+
 type LoadBalancer interface {
 	SetPolicyFactory(func() LBPolicy)
 	// Add is called when a new wire is created
@@ -2619,19 +2628,30 @@ type LoadBalancer interface {
 	PickOne(Envelope, []*Wire) (*Wire, error)
 	// PickAll is called before the message is sent
 	PickAll(Envelope, []*Wire) ([]*Wire, error)
+	// Borrow is called before the message is sent
+	Use(*Wire, Envelope) Wirer
 	// Done is called when we are done with one wire
-	Done(*Wire, Envelope, error)
+	Done(Wirer, Envelope, error)
 	// AllDone is called when ALL wires have been processed
 	AllDone(Envelope, error) error
 }
 
+type Loader interface {
+	IsZero() bool
+}
+
+type Comparer interface {
+	// Compare returns 0 if equal, -1 if lesser and 1 if greater
+	Compare(Comparer) int
+}
+
 type LBPolicy interface {
-	IncLoad(string) uint64
-	Load(string) uint64
-	// Failed is called when an error ocurrs.
-	Failed(string)
-	// Failed is called when a success ocurrs.
-	Succeeded(string)
-	// InQuarantine returns if it is in quarantine
-	InQuarantine(string) bool
+	Init(string, Comparer) Loader
+	Borrow(string) Loader
+	Return(string, Loader, error)
+
+	// Load is the load for a service
+	Load(string) Comparer
+	// Quarantined returns if it is in quarantine
+	Quarantined(string) bool
 }

@@ -17,7 +17,7 @@ func wait() {
 }
 
 func main() {
-	var logger = log.LoggerFor("github.com/quintans/gmsg").SetCallerAt(2)
+	var logger = log.LoggerFor("/").SetCallerAt(2)
 	server := gomsg.NewServer()
 	server.SetDefaultTimeout(time.Second)
 	server.SetLogger(log.Wrap{logger, "{server}"})
@@ -32,7 +32,7 @@ func main() {
 	})
 	var err = <-cli.Connect("localhost:7777")
 	if err != nil {
-		fmt.Println("===> ERROR:", err)
+		fmt.Printf("===> ERROR: %+v\n", err)
 	}
 	wait()
 
@@ -44,7 +44,7 @@ func main() {
 		fmt.Println("===> reply:", r)
 	})
 	if err != nil {
-		fmt.Println("===> ERROR:", err)
+		fmt.Printf("===> ERROR: %+v\n", err)
 	}
 	if reply != "olleh" {
 		fmt.Println("ERROR: Expected \"olleh\", got", reply)

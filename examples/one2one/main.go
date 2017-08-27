@@ -5,10 +5,17 @@ import (
 	"time"
 
 	"github.com/quintans/gomsg"
+	"github.com/quintans/toolkit/log"
 )
 
+func init() {
+	log.Register("/", log.DEBUG).ShowCaller(true)
+}
+
 func main() {
+	var logger = log.LoggerFor("/").SetCallerAt(2)
 	server := gomsg.NewServer()
+	server.SetLogger(log.Wrap{logger, "{server}"})
 	server.Handle("HELLO", func(ctx *gomsg.Request, m string) (string, error) {
 		fmt.Println("<=== processing:", m, "from", ctx.Connection().RemoteAddr())
 		return fmt.Sprintf("Hello %s", m), nil
@@ -19,6 +26,7 @@ func main() {
 	server.Listen(":7777")
 
 	cli := gomsg.NewClient()
+	cli.SetLogger(log.Wrap{logger, "{cli}"})
 	cli.Handle("REVERSE", func(ctx *gomsg.Request, m string) (string, error) {
 		fmt.Println("<=== processing (1):", m, "from", ctx.Connection().RemoteAddr())
 		return fmt.Sprintf("[1]=%s", reverse(m)), nil
@@ -29,6 +37,7 @@ func main() {
 	cli.Connect("localhost:7777")
 
 	cli2 := gomsg.NewClient()
+	cli2.SetLogger(log.Wrap{logger, "{cli2}"})
 	cli2.Handle("REVERSE", func(ctx *gomsg.Request, m string) (string, error) {
 		fmt.Println("<=== processing (2):", m, "from", ctx.Connection().RemoteAddr())
 		return fmt.Sprintf("[2]=%s", reverse(m)), nil

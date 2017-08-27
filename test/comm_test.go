@@ -7,6 +7,7 @@ import (
 	"time"
 
 	. "github.com/quintans/gomsg"
+	"github.com/quintans/toolkit/log"
 )
 
 const (
@@ -30,21 +31,37 @@ func waitASecond() {
 	time.Sleep(time.Second)
 }
 
+func init() {
+	log.Register("/", log.DEBUG).ShowCaller(true)
+}
+
+var logger = log.LoggerFor("/").SetCallerAt(2)
+
 func TestPubSubOneToOne(t *testing.T) {
 	wait() // give time to the previous test to shutdown
 
 	var request string
 	server := NewServer()
+	server.SetLogger(log.Wrap{logger, "{server}"})
 	server.Handle(CONSUMER, func(m string) {
 		fmt.Println("<<< handling client pub:", m)
 		request = m
 	})
-	server.Listen(SERVER_PORT_1)
-	defer server.Destroy()
+	go func() {
+		if err := <-server.Listen(SERVER_PORT_1); err != nil {
+			t.Fatalf("Failed when listening. %+v", err)
+		}
+		fmt.Println("Destroying server")
+	}()
+
+	// give time to connect
+	wait()
 
 	cli := NewClient()
-	defer cli.Destroy()
-	<-cli.Connect(SERVER_1)
+	cli.SetLogger(log.Wrap{logger, "{cli}"})
+	if err := <-cli.Connect(SERVER_1); err != nil {
+		t.Fatalf("Failed when trying to connect. %+v", err)
+	}
 	// give time to connect
 	wait()
 
@@ -75,6 +92,11 @@ func TestPubSubOneToOne(t *testing.T) {
 	if request != MESSAGE {
 		t.Fatalf(FORMAT_ERROR, MESSAGE, request)
 	}
+
+	fmt.Println("Destroying client...")
+	cli.Destroy()
+	fmt.Println("Destroying server...")
+	server.Destroy()
 }
 
 func TestPubSub(t *testing.T) {

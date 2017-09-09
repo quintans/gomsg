@@ -1,151 +1,56 @@
 package gomsg
 
 import (
-	"fmt"
-	"sort"
 	"sync"
-	"sync/atomic"
-	"time"
 )
 
-var _ LBPolicy = &SimpleLBPolicy{}
+var _ LBPolicy = &RoundRobinPolicy{}
 
-type SimpleLBPolicy struct {
-	Quarantine time.Duration
-	until      time.Time
-}
+type rrLoad uint64
 
-func (this *SimpleLBPolicy) IncLoad(name string) uint64 {
-	return 0
-}
-
-func (this *SimpleLBPolicy) Load(name string) uint64 {
-	return 0
-}
-
-func (this *SimpleLBPolicy) Failed(name string) {
-	this.until = time.Now().Add(this.Quarantine)
-}
-
-func (this *SimpleLBPolicy) Succeeded(string) {
-}
-
-func (this *SimpleLBPolicy) InQuarantine(string) bool {
-	return time.Now().Before(this.until)
-}
-
-var _ LoadBalancer = RoundRobinLB{}
-
-type RoundRobinLB struct {
-	sync.RWMutex
-	Stickies
-
-	policyFactory func() LBPolicy
-	counter       uint64
-}
-
-func NewRoundRobinLB() RoundRobinLB {
-	return RoundRobinLB{
-		Stickies: make(map[string]*Sticky),
-		policyFactory: func() LBPolicy {
-			return &SimpleLBPolicy{
-				Quarantine: time.Second * 5,
-			}
-		},
-	}
-}
-
-func (lb RoundRobinLB) SetPolicyFactory(factory func() LBPolicy) {
-	lb.policyFactory = factory
-}
-
-// Add adds wire to load balancer
-func (lb RoundRobinLB) Add(w *Wire) {
-	w.Policy = lb.policyFactory()
-}
-
-// Remove removes wire from load balancer
-func (lb RoundRobinLB) Remove(w *Wire) {
-	lb.Lock()
-	//w.Policy = nil
-	lb.Unstick(w)
-	lb.Unlock()
-}
-
-func (lb RoundRobinLB) AllDone(msg Envelope, err error) error {
-	return err
-}
-
-func (lb RoundRobinLB) Done(w *Wire, msg Envelope, err error) {
-	if err != nil {
-		w.Policy.Failed(msg.Name)
-
-		lb.Lock()
-		defer lb.Unlock()
-		lb.Unstick(w)
-	}
-}
-
-func (lb RoundRobinLB) PickOne(msg Envelope, wires []*Wire) (*Wire, error) {
-	// get valid wires
-	var valid, err = lb.PickAll(msg, wires)
-	if err != nil {
-		return nil, err
-	}
-
-	lb.Lock()
-	var wire, sticker = lb.IsSticky(msg.Name, valid)
-	lb.Unlock()
-	if wire != nil {
-		// prepare
-		atomic.AddUint64(&lb.counter, 1)
-		return wire, nil
-	}
-
-	// since valid is sorted, the first one has the lowest load
-	var w = valid[0]
-	if sticker != nil {
-		sticker.lastWire = w
-	}
-
-	// prepare
-	atomic.AddUint64(&lb.counter, 1)
-	return w, nil
-}
-
-func (lb RoundRobinLB) PickAll(msg Envelope, wires []*Wire) ([]*Wire, error) {
-	// NOTE: for messages of type PUB and REQALL the sticker does not make sense
-
-	// make array with the max capacity
-	var ws = make([]*Wire, 0, len(wires))
-	for _, w := range wires {
-		if !w.Policy.InQuarantine(msg.Name) {
-			ws = append(ws, w)
+func (l rrLoad) Compare(c Comparer) int {
+	if other, ok := c.(rrLoad); ok {
+		if l < other {
+			return -1
+		} else if l > other {
+			return 1
+		} else {
+			return 0
 		}
 	}
-
-	var size = len(ws)
-	if size == 0 {
-		return nil, ServiceUnavailableError(fmt.Errorf(UNAVAILABLESERVICE, msg.Name))
-	}
-
-	// sort by load
-	var counter = atomic.AddUint64(&lb.counter, 1)
-	var cursor = int(counter % uint64(size))
-	sort.Slice(ws, func(i, j int) bool {
-		var posi = transform(cursor, size, i)
-		var posj = transform(cursor, size, j)
-		return posi < posj
-	})
-
-	return ws, nil
+	return 10
 }
 
-// round robin transformation
-func transform(cursor, size, x int) int {
-	x -= cursor
-	if x < 0 {
-		x = size - cursor
+type RoundRobinPolicy struct {
+	sync.RWMutex
+	load rrLoad
+}
+
+func (this *RoundRobinPolicy) Borrow(topic string, initializer func(topic string) Comparer) Comparer {
+	this.Lock()
+	defer this.Unlock()
+
+	if this.load == 0 {
+		if load := initializer(topic); load != nil {
+			this.load = initializer(topic).(rrLoad)
+		}
 	}
-	return x
+	this.load++
+	return this.load
+}
+
+func (this *RoundRobinPolicy) Return(topic string, comp Comparer, err error) {
+
+}
+
+// Load is the current load for a service
+func (this *RoundRobinPolicy) Load(topic string) Comparer {
+	this.Lock()
+	defer this.Unlock()
+	return this.load
+}
+
+// Quarantined returns if it is in quarantine
+func (this *RoundRobinPolicy) Quarantined(topic string) bool {
+	return false
 }

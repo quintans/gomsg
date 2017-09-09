@@ -17,10 +17,6 @@ type loader struct {
 	time time.Time
 }
 
-func (l loader) IsZero() bool {
-	return l.load == 0
-}
-
 func (l loader) Compare(c Comparer) int {
 	if other, ok := c.(loader); ok {
 		if l.load < other.load {
@@ -34,6 +30,15 @@ func (l loader) Compare(c Comparer) int {
 	return 10
 }
 
+// HysteresisPolicy is the policy to control the connections load.
+// For each topic name there will be a load
+// that is the sum time that the connection is borrowed.
+// Each load is initiated with a load, usually the minimum load for all wires for that topic.
+// The strategy used in this policy is of a Circuit Breaker.
+// After the circuit is open, a quarantine time is observed. After that quarantine,
+// the topic is tested letting ONE connection pass. Until that connection is returned,
+// no more connections are borrowed.
+// After the connection is returned is when we test if we should close the circuit.
 type HysteresisPolicy struct {
 	sync.RWMutex
 	data         map[string]*HysteresisPolicyData
@@ -43,20 +48,42 @@ type HysteresisPolicy struct {
 }
 
 type HysteresisPolicyData struct {
-	failures        int
-	successes       int
-	quarantineUntil time.Time
-	load            uint64
-	quarantine      bool
+	continuousFailures  int
+	continuousSuccesses int
+	quarantineUntil     time.Time
+	open                bool
+	test                bool
+	load                uint64
+	quarantine          bool
 
 	borrowed    map[uint64]loader
 	borrowedIdx uint64
 }
 
-func (this *HysteresisPolicy) Init(name string, initial Comparer) Loader {
-	this.Lock()
-	defer this.Unlock()
+func NewHysteresisPolicy() *HysteresisPolicy {
+	return &HysteresisPolicy{
+		Quarantine:  time.Second * 10,
+		MaxFailures: 3,
+		data:        make(map[string]*HysteresisPolicyData),
+	}
+}
 
+func (this *HysteresisPolicy) SetQuarantine(quarantine time.Duration) *HysteresisPolicy {
+	this.Quarantine = quarantine
+	return this
+}
+
+func (this *HysteresisPolicy) SetMaxFailures(maxFailures int) *HysteresisPolicy {
+	this.MaxFailures = maxFailures
+	return this
+}
+
+func (this *HysteresisPolicy) SetMinSuccesses(minSuccesses int) *HysteresisPolicy {
+	this.MinSuccesses = minSuccesses
+	return this
+}
+
+func (this *HysteresisPolicy) init(name string, initial Comparer) Comparer {
 	var borrowed = make(map[uint64]loader)
 
 	var borrow = loader{
@@ -77,15 +104,28 @@ func (this *HysteresisPolicy) Init(name string, initial Comparer) Loader {
 	return borrow
 }
 
-func (this *HysteresisPolicy) Borrow(name string) Loader {
+func (this *HysteresisPolicy) Borrow(name string, initialize func(name string) Comparer) Comparer {
 	this.Lock()
 	defer this.Unlock()
 
 	var borrow loader
 	var data = this.data[name]
 	if data == nil {
-		return loader{}
+		var load = initialize(name)
+		return this.init(name, load)
 	} else {
+		// if the circuit is open,
+		// we just let one test connection to be borrowed
+		if data.open {
+			if data.test {
+				// testing connection is already borrowed
+				return nil
+			} else {
+				// lock testing connection
+				data.test = true
+			}
+		}
+
 		data.borrowedIdx++
 		borrow = loader{
 			load: data.load,
@@ -98,13 +138,15 @@ func (this *HysteresisPolicy) Borrow(name string) Loader {
 	return borrow
 }
 
-func (this *HysteresisPolicy) Return(name string, loaded Loader, err error) {
+func (this *HysteresisPolicy) Return(name string, loaded Comparer, err error) {
 	this.Lock()
 	defer this.Unlock()
 
 	var load = loaded.(loader)
 	var data = this.data[name]
 	if data != nil {
+		// reset the testing flag
+		data.test = false
 		// will sum time diff between when it was borrowed and now.
 		data.load += uint64(time.Now().Sub(load.time))
 		if err == nil {
@@ -120,29 +162,32 @@ func (this *HysteresisPolicy) Return(name string, loaded Loader, err error) {
 }
 
 func (this *HysteresisPolicy) failed(data *HysteresisPolicyData) bool {
-	if data.failures >= this.MaxFailures {
-		// OPEN
-		data.successes = 0
+	data.continuousSuccesses = 0
+	if data.open {
 		data.quarantineUntil = time.Now().Add(this.Quarantine)
 		return true
+	} else {
+		data.continuousFailures++
+		if this.MaxFailures > -1 && data.continuousFailures > this.MaxFailures {
+			// OPEN
+			data.open = true
+			data.quarantineUntil = time.Now().Add(this.Quarantine)
+			return true
+		}
 	}
 
-	data.successes = 0
-	data.failures++
 	return false
 }
 
 func (this *HysteresisPolicy) succeeded(data *HysteresisPolicyData) {
-	if data.successes >= this.MinSuccesses {
-		// CLOSE
-		data.failures = 0
-		return
+	data.continuousFailures = 0
+	if data.open {
+		data.continuousSuccesses++
+		if data.continuousSuccesses > this.MinSuccesses {
+			// CLOSE
+			data.open = false
+		}
 	}
-	if data.failures < this.MaxFailures {
-		// not OPEN
-		data.failures = 0
-	}
-	data.successes++
 }
 
 func (this *HysteresisPolicy) Quarantined(name string) bool {
@@ -154,7 +199,7 @@ func (this *HysteresisPolicy) Quarantined(name string) bool {
 		// if it has no data is new
 		return false
 	} else {
-		return time.Now().Before(data.quarantineUntil)
+		return data.test || time.Now().Before(data.quarantineUntil)
 
 	}
 
@@ -179,7 +224,7 @@ func (this *HysteresisPolicy) Load(name string) Comparer {
 	}
 }
 
-var _ LoadBalancer = SimpleLB{}
+var _ LoadBalancer = &SimpleLB{}
 
 type SimpleLB struct {
 	sync.RWMutex
@@ -188,42 +233,38 @@ type SimpleLB struct {
 	wires         map[*Wire]bool
 }
 
-func NewSimpleLB() SimpleLB {
-	return SimpleLB{
+func NewSimpleLB() *SimpleLB {
+	return &SimpleLB{
 		Stickies: make(map[string]*Sticky),
 		wires:    make(map[*Wire]bool),
 		policyFactory: func() LBPolicy {
-			return &HysteresisPolicy{
-				Quarantine:  time.Second * 10,
-				MaxFailures: 3,
-				data:        make(map[string]*HysteresisPolicyData),
-			}
+			return NewHysteresisPolicy()
 		},
 	}
 }
 
 type Wired struct {
 	wire   *Wire
-	loader Loader
+	loader Comparer
 }
 
 func (this *Wired) Wire() *Wire {
 	return this.wire
 }
 
-func (lb SimpleLB) SetPolicyFactory(factory func() LBPolicy) {
+func (lb *SimpleLB) SetPolicyFactory(factory func() LBPolicy) {
 	lb.policyFactory = factory
 }
 
 // Add adds wire to load balancer
-func (lb SimpleLB) Add(w *Wire) {
+func (lb *SimpleLB) Add(w *Wire) {
 	lb.Lock()
 	w.Policy = lb.policyFactory()
 	lb.Unlock()
 }
 
 // Remove removes wire from load balancer
-func (lb SimpleLB) Remove(w *Wire) {
+func (lb *SimpleLB) Remove(w *Wire) {
 	lb.Lock()
 	//w.Policy = nil
 	delete(lb.wires, w)
@@ -231,21 +272,23 @@ func (lb SimpleLB) Remove(w *Wire) {
 	lb.Unlock()
 }
 
-func (lb SimpleLB) AllDone(msg Envelope, err error) error {
+func (lb *SimpleLB) AllDone(msg Envelope, err error) error {
 	return err
 }
 
-func (lb SimpleLB) Use(wire *Wire, msg Envelope) Wirer {
-	var loaded = wire.Policy.Borrow(msg.Name)
-	if loaded.IsZero() {
+func (lb *SimpleLB) Use(wire *Wire, msg Envelope) Wirer {
+	var loaded = wire.Policy.Borrow(msg.Name, func(name string) Comparer {
 		// initialization
-		var load = lb.findMinLoad(msg.Name)
-		loaded = wire.Policy.Init(msg.Name, load)
+		return lb.findMinLoad(msg.Name)
+	})
+	if loaded == nil {
+		return nil
+	} else {
+		return &Wired{wire, loaded}
 	}
-	return &Wired{wire, loaded}
 }
 
-func (lb SimpleLB) Done(wirer Wirer, msg Envelope, err error) {
+func (lb *SimpleLB) Done(wirer Wirer, msg Envelope, err error) {
 	var w = wirer.(*Wired)
 	w.wire.Policy.Return(msg.Name, w.loader, err)
 	if err != nil {
@@ -255,7 +298,7 @@ func (lb SimpleLB) Done(wirer Wirer, msg Envelope, err error) {
 	}
 }
 
-func (lb SimpleLB) PickAll(msg Envelope, wires []*Wire) ([]*Wire, error) {
+func (lb *SimpleLB) PickAll(msg Envelope, wires []*Wire) ([]*Wire, error) {
 
 	// NOTE: for messages of type PUB and REQALL the sticker does not make sense
 	type loadedWire struct {
@@ -290,7 +333,7 @@ func (lb SimpleLB) PickAll(msg Envelope, wires []*Wire) ([]*Wire, error) {
 	return ws, nil
 }
 
-func (lb SimpleLB) PickOne(msg Envelope, wires []*Wire) (*Wire, error) {
+func (lb *SimpleLB) PickOne(msg Envelope, wires []*Wire) (*Wire, error) {
 	// get valid wires
 	var valid, err = lb.PickAll(msg, wires)
 	if err != nil {
@@ -313,7 +356,7 @@ func (lb SimpleLB) PickOne(msg Envelope, wires []*Wire) (*Wire, error) {
 	return minw, nil
 }
 
-func (lb SimpleLB) findMinLoad(name string) Comparer {
+func (lb *SimpleLB) findMinLoad(name string) Comparer {
 	lb.Lock()
 	defer lb.Unlock()
 

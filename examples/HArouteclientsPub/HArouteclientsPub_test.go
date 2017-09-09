@@ -11,6 +11,9 @@ import (
 func TestHA(t *testing.T) {
 	// all messages arriving to the server are routed to the clients
 	server := gomsg.NewServer()
+	server.LoadBalancer().SetPolicyFactory(func() gomsg.LBPolicy {
+		return &gomsg.RoundRobinPolicy{}
+	})
 	server.Listen(":7777")
 	server.Route("*", time.Second, nil, nil)
 

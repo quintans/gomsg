@@ -707,6 +707,11 @@ func handleReply(msg Envelope, responses <-chan Response) {
 	}
 }
 
+func (this *Wire) replyEncoded(kind EKind, seq uint32, payload interface{}) {
+	var reply, _ = this.codec.Encode(payload)
+	this.reply(kind, seq, reply)
+}
+
 func (this *Wire) reply(kind EKind, seq uint32, payload []byte) {
 	var msg = Envelope{
 		Kind:     kind,
@@ -893,60 +898,32 @@ func (this *Wire) reader(c net.Conn) {
 func (this *Wire) runHandler(c net.Conn, msg Envelope) {
 	if msg.Kind == REQ || msg.Kind == REQALL {
 		// Serve
-		var reply []byte
-		var err error
-		var deferReply bool
-		var terminate bool
 		var handlers = this.findHandlers(msg.Name)
 		if len(handlers) > 0 {
-			var req = NewRequest(this, c, msg)
+			var r = NewRequest(this, c, msg)
 			for _, hnd := range handlers {
-				hnd.call(req)
-				// if there is any handler that terminates,
-				// there will be no reply
-				if req.terminate {
-					terminate = true
-				}
-				// if there is at least one handler with gomsg.Request
-				// there will be no explicit reply,
-				if req.deferReply {
-					deferReply = true
-					reply = nil
-				}
-				if req.Fault() != nil {
-					err = req.Fault() // single fault
-					reply = nil
-					break
-				} else if !deferReply {
-					if req.Reply() != nil {
-						reply = req.Reply() // single reply
-						break
+				hnd.call(r, func(req *Request) {
+					// only sends a reply if there was some kind of return action
+					if req.terminate {
+						// if the request was terminated,
+						// there will be no reply
+						this.reply(ACK, msg.Sequence, nil)
+					} else if !req.deferReply {
+						var e = req.Fault() // single fault
+						if e != nil {
+							this.replyEncoded(ERR, msg.Sequence, e.Error())
+						} else {
+							// single reply
+							this.reply(REP, msg.Sequence, req.Reply())
+						}
 					}
-				}
-				// reset
-				req.terminate = false
-				req.deferReply = false
+				})
 			}
+
 		} else {
-			err = UnknownTopic(faults.New(UNKNOWNTOPIC, msg.Name))
+			this.replyEncoded(ERR, msg.Sequence, fmt.Sprintf(UNKNOWNTOPIC, msg.Name))
 		}
 
-		// only sends a reply if there was some kind of return action
-		if terminate {
-			this.reply(ACK, msg.Sequence, nil)
-		} else if !deferReply {
-			if err != nil {
-				msg.Kind = ERR
-				if this.codec != nil {
-					reply, _ = this.codec.Encode(err.Error())
-				} else {
-					reply = []byte(err.Error())
-				}
-			} else {
-				msg.Kind = REP
-			}
-			this.reply(msg.Kind, msg.Sequence, reply)
-		}
 	} else { // PUSH & PUB
 		var handlers = this.findHandlers(msg.Name)
 
@@ -962,7 +939,7 @@ func (this *Wire) runHandler(c net.Conn, msg Envelope) {
 		if len(handlers) > 0 {
 			var req = NewRequest(this, c, msg)
 			for _, handler := range handlers {
-				handler.call(req)
+				handler.call(req, nil)
 			}
 		}
 	}
@@ -1172,23 +1149,32 @@ func CreateRequestHandler(codec Codec, fun interface{}, logger log.ILogger) func
 
 type handler struct {
 	sync.RWMutex
-	rule   string
-	calls  []Middleware
-	serial chan *Request
+	rule  string
+	calls []Middleware
+	// handle request in sequence
+	serial chan serialReq
 }
 
-func (h *handler) thecall(r *Request) {
+type serialReq struct {
+	req *Request
+	hnd func(*Request)
+}
+
+func (h *handler) thecall(r *Request, hnd func(r *Request)) {
 	r.middleware = h.calls
 	r.middlewarePos = 0
 	h.calls[0](r)
+	if hnd != nil {
+		hnd(r)
+	}
 }
 
-func (h *handler) call(r *Request) {
+func (h *handler) call(r *Request, hnd func(r *Request)) {
 	h.RLock()
 	if h.serial == nil {
-		h.thecall(r)
+		go h.thecall(r, hnd)
 	} else {
-		go h.thecall(r)
+		h.serial <- serialReq{r, hnd}
 	}
 	h.RUnlock()
 }
@@ -1260,9 +1246,9 @@ func (this *ClientServer) addHandler(name string, serial bool, hnds []Middleware
 	this.muhnd.Lock()
 	defer this.muhnd.Unlock()
 
-	var reqch chan *Request
+	var reqch chan serialReq
 	if serial {
-		reqch = make(chan *Request, 100)
+		reqch = make(chan serialReq, 100)
 	}
 	var h = &handler{
 		rule:   name,
@@ -1284,9 +1270,9 @@ func (this *ClientServer) addHandler(name string, serial bool, hnds []Middleware
 	this.handlers = append(this.handlers, h)
 }
 
-func handleSerial(h *handler, ch chan *Request) {
-	for r := range ch {
-		h.call(r)
+func handleSerial(h *handler, ch chan serialReq) {
+	for s := range ch {
+		h.thecall(s.req, s.hnd)
 	}
 }
 
@@ -1639,12 +1625,14 @@ func (this *Client) Handle(name string, middlewares ...interface{}) {
 	this.handle(name, false, middlewares...)
 }
 
+// HandleSerial is the same as Handle except that it handles requests in sequence.
+// It next request is handled after it returns from the previous.
 func (this *Client) HandleSerial(name string, middlewares ...interface{}) {
 	this.handle(name, true, middlewares...)
 }
 
 func (this *Client) handle(name string, serial bool, middlewares ...interface{}) {
-	this.logger.Infof("Registering handler for %s", name)
+	this.logger.Infof("Registering handler (sequencial=%t) for %s", serial, name)
 
 	var size = len(middlewares)
 	var hnds = make([]Middleware, size)
@@ -2161,16 +2149,17 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 						defErr = err
 						break
 					}
-					var wired = this.loadBalancer.Use(w, msg)
-					// REQ can also receive multiple messages from ONE replier
-					err = <-this.send(w, msg)
-					this.loadBalancer.Done(wired, msg, err)
-					// exit on success
-					if err == nil {
-						defErr = nil
-						break
-					} else {
-						this.logger.Debugf("Failed to send %s to %s. Cause=%s", msg, w.Conn().RemoteAddr(), err)
+					if wired := this.loadBalancer.Use(w, msg); wired != nil {
+						// REQ can also receive multiple messages from ONE replier
+						err = <-this.send(w, msg)
+						this.loadBalancer.Done(wired, msg, err)
+						defErr = err // keeps the last error
+						// exit on success
+						if err == nil {
+							break
+						} else {
+							this.logger.Debugf("Failed to send %s. Cause=%s", msg, err)
+						}
 					}
 				}
 			}
@@ -2191,15 +2180,16 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 				wg.Add(1)
 				go func() {
 					for _, w := range ws {
-						var wired = this.loadBalancer.Use(w, msg)
-						var e = <-this.send(w, msg)
-						this.loadBalancer.Done(wired, msg, e)
-						if err == nil {
-							// At least one got through.
-							// Ignoring all errors
-							defErr = nil
-						} else {
-							this.logger.Debugf("Failed to send %s to %s. Cause=%s", msg, w.Conn().RemoteAddr(), e)
+						if wired := this.loadBalancer.Use(w, msg); wired != nil {
+							var e = <-this.send(w, msg)
+							this.loadBalancer.Done(wired, msg, e)
+							if err == nil {
+								// At least one got through.
+								// Ignoring all errors
+								defErr = nil
+							} else {
+								this.logger.Debugf("Failed to send %s to %s. Cause=%s", msg, w.Conn().RemoteAddr(), e)
+							}
 						}
 					}
 					wg.Done()
@@ -2208,17 +2198,18 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 				wg.Add(1)
 				go func(wires []*Wire) {
 					for _, w := range wires {
-						var wired = this.loadBalancer.Use(w, msg)
-						var err = <-this.send(w, msg)
-						this.loadBalancer.Done(wired, msg, err)
-						// send only to one.
-						// stop if there was a success.
-						if err == nil {
-							// Ignoring errors
-							defErr = nil
-							break
-						} else {
-							this.logger.Debugf("Failed to send %s to %s. Cause=%s", msg, w.Conn().RemoteAddr(), err)
+						if wired := this.loadBalancer.Use(w, msg); wired != nil {
+							var err = <-this.send(w, msg)
+							this.loadBalancer.Done(wired, msg, err)
+							// send only to one.
+							// stop if there was a success.
+							if err == nil {
+								// Ignoring errors
+								defErr = nil
+								break
+							} else {
+								this.logger.Debugf("Failed to send %s to %s. Cause=%s", msg, w.Conn().RemoteAddr(), err)
+							}
 						}
 					}
 					wg.Done()
@@ -2269,15 +2260,16 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 					wg.Add(1)
 					go func(w *Wire) {
 						// waits for the request completion
-						var wired = this.loadBalancer.Use(w, msg)
-						var e = <-this.send(w, msg)
-						this.loadBalancer.Done(wired, msg, e)
-						if e == nil {
-							// at least one got through
-							// Ignoring errors
-							defErr = nil
-						} else {
-							this.logger.Errorf("Failed requesting all: %+v", e)
+						if wired := this.loadBalancer.Use(w, msg); wired != nil {
+							var e = <-this.send(w, msg)
+							this.loadBalancer.Done(wired, msg, e)
+							if e == nil {
+								// at least one got through
+								// Ignoring errors
+								defErr = nil
+							} else {
+								this.logger.Errorf("Failed requesting all: %+v", e)
+							}
 						}
 						wg.Done()
 					}(wire)
@@ -2288,16 +2280,17 @@ func (this *Wires) SendSkip(skipWire *Wire, kind EKind, name string, payload int
 				go func(wires []*Wire) {
 					for _, w := range ws {
 						this.logger.Tracef("sending message to %s (group %s)", w.Conn().RemoteAddr(), id)
-						var wired = this.loadBalancer.Use(w, msg)
-						// waits for the request completion
-						e := <-this.send(w, msg)
-						// send only to one.
-						// stop if there was a success.
-						this.loadBalancer.Done(wired, msg, e)
-						if e == nil {
-							// Ignoring errors
-							defErr = nil
-							break
+						if wired := this.loadBalancer.Use(w, msg); wired != nil {
+							// waits for the request completion
+							e := <-this.send(w, msg)
+							// send only to one.
+							// stop if there was a success.
+							this.loadBalancer.Done(wired, msg, e)
+							if e == nil {
+								// Ignoring errors
+								defErr = nil
+								break
+							}
 						}
 					}
 					wg.Done()
@@ -2702,16 +2695,12 @@ type LoadBalancer interface {
 	PickOne(Envelope, []*Wire) (*Wire, error)
 	// PickAll is called before the message is sent
 	PickAll(Envelope, []*Wire) ([]*Wire, error)
-	// Borrow is called before the message is sent
+	// Use is called before the message is sent
 	Use(*Wire, Envelope) Wirer
 	// Done is called when we are done with one wire
 	Done(Wirer, Envelope, error)
 	// AllDone is called when ALL wires have been processed
 	AllDone(Envelope, error) error
-}
-
-type Loader interface {
-	IsZero() bool
 }
 
 type Comparer interface {
@@ -2720,11 +2709,11 @@ type Comparer interface {
 }
 
 type LBPolicy interface {
-	Init(string, Comparer) Loader
-	Borrow(string) Loader
-	Return(string, Loader, error)
+	// Borrow returns
+	Borrow(string, func(string) Comparer) Comparer
+	Return(string, Comparer, error)
 
-	// Load is the load for a service
+	// Load is the current load for a service
 	Load(string) Comparer
 	// Quarantined returns if it is in quarantine
 	Quarantined(string) bool

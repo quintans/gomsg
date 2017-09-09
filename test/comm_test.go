@@ -421,6 +421,9 @@ func TestRouteClientsHA(t *testing.T) {
 	wait() // give time to the previous test to shutdown
 
 	server := NewServer()
+	server.LoadBalancer().SetPolicyFactory(func() LBPolicy {
+		return &RoundRobinPolicy{}
+	})
 	defer server.Destroy()
 	server.Listen(SERVER_PORT_1)
 	// all messages arriving to the server are routed to the clients
@@ -472,11 +475,14 @@ func TestRouteClientsHA(t *testing.T) {
 
 	// Only one element of the group HA will process each message, alternately (round robin).
 	cli3.Publish(CONSUMER, "one")
-	cli3.Publish(CONSUMER, "two")
-	cli3.Publish(CONSUMER, "three")
-	cli3.Publish(CONSUMER, "four")
-
 	wait()
+	cli3.Publish(CONSUMER, "two")
+	wait()
+	cli3.Publish(CONSUMER, "three")
+	wait()
+	cli3.Publish(CONSUMER, "four")
+	wait()
+
 	if ungrouped != 4 {
 		t.Fatalf(FORMAT_ERROR, 4, ungrouped)
 	}

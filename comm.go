@@ -144,8 +144,9 @@ func (this *Context) Connection() net.Conn {
 type Response struct {
 	*Context
 
-	reply []byte
-	fault error
+	reply         []byte
+	fault         error
+	streamFactory StreamFactory
 }
 
 //var _ IResponse = Response{}
@@ -158,6 +159,7 @@ func NewResponse(wire *Wire, c net.Conn, kind EKind, seq uint32, payload []byte)
 			Kind:     kind,
 			sequence: seq,
 		},
+		streamFactory: wire.streamFactory,
 	}
 
 	if kind == ERR || kind == ERR_PARTIAL {
@@ -168,8 +170,8 @@ func NewResponse(wire *Wire, c net.Conn, kind EKind, seq uint32, payload []byte)
 	return r
 }
 
-func (this Response) Reader() *InputStream {
-	return NewInputStream(bytes.NewReader(this.reply))
+func (this Response) Reader() InputStream {
+	return this.streamFactory.Input(bytes.NewReader(this.reply))
 }
 
 func (this Response) Reply() []byte {
@@ -206,6 +208,7 @@ type Request struct {
 
 	middleware    []Middleware
 	middlewarePos int
+	streamFactory StreamFactory
 }
 
 //var _ IRequest = &Request{}
@@ -220,6 +223,7 @@ func NewRequest(wire *Wire, c net.Conn, msg Envelope) *Request {
 				Name:     msg.Name,
 				sequence: msg.Sequence,
 			},
+			streamFactory: wire.streamFactory,
 		},
 		payload: msg.Payload,
 	}
@@ -248,9 +252,9 @@ func (this *Request) Payload() []byte {
 	return this.payload
 }
 
-func (this *Request) Writer() *OutputStream {
+func (this *Request) Writer() OutputStream {
 	this.writer = new(bytes.Buffer)
-	return NewOutputStream(this.writer)
+	return this.streamFactory.Output(this.writer)
 }
 
 // sets a single reply error (ERR)
@@ -314,15 +318,15 @@ func (this *Request) ReplyAs(kind EKind, reply []byte) {
 //var _ IContext = &Context{}
 
 type Msg struct {
-	*OutputStream
+	OutputStream
 	buffer *bytes.Buffer
 }
 
-func NewMsg() *Msg {
+func NewMsg(factory StreamFactory) *Msg {
 	var buffer = new(bytes.Buffer)
 
 	return &Msg{
-		NewOutputStream(buffer),
+		factory.Output(buffer),
 		buffer,
 	}
 }
@@ -394,14 +398,21 @@ type Wire struct {
 	rateLimiter tk.Rate
 	bufferSize  int
 	logger      log.ILogger
+
+	streamFactory StreamFactory
 }
 
-func NewWire(codec Codec, l log.ILogger) *Wire {
+func NewWire(
+	codec Codec,
+	l log.ILogger,
+	factory StreamFactory,
+) *Wire {
 	wire := &Wire{
-		timeout:    defTimeout,
-		codec:      codec,
-		bufferSize: 1000,
-		logger:     l,
+		timeout:       defTimeout,
+		codec:         codec,
+		bufferSize:    1000,
+		logger:        l,
+		streamFactory: factory,
 	}
 	wire.reset()
 	return wire
@@ -752,7 +763,7 @@ func (this *Wire) write(c net.Conn, msg Envelope) (err error) {
 	c.SetWriteDeadline(timeouttime(msg.timeout))
 
 	buf := bufio.NewWriter(c)
-	w := NewOutputStream(buf)
+	w := this.streamFactory.Output(buf)
 
 	// kind
 	err = w.WriteUI8(uint8(msg.Kind))
@@ -783,7 +794,7 @@ func (this *Wire) write(c net.Conn, msg Envelope) (err error) {
 	return buf.Flush()
 }
 
-func read(r *InputStream, bname bool, bpayload bool) (name string, payload []byte, err error) {
+func read(r InputStream, bname bool, bpayload bool) (name string, payload []byte, err error) {
 	if bname {
 		name, err = r.ReadString()
 		if err != nil {
@@ -800,7 +811,7 @@ func read(r *InputStream, bname bool, bpayload bool) (name string, payload []byt
 }
 
 func (this *Wire) reader(c net.Conn) {
-	r := NewInputStream(c)
+	r := this.streamFactory.Input(c)
 	var err error
 
 	for {
@@ -1335,7 +1346,7 @@ func NewClient() *Client {
 	this := &Client{
 		reconnectInterval:    time.Millisecond * 10,
 		reconnectMaxInterval: time.Second * 3,
-		Wire:                 NewWire(JsonCodec{}, Log{}),
+		Wire:                 NewWire(JsonCodec{}, Log{}, BinStreamFactory{}),
 		defaultTimeout:       defTimeout,
 	}
 	this.ClientServer = NewClientServer()
@@ -1376,6 +1387,10 @@ func NewClient() *Client {
 	return this
 }
 
+func (this *Client) SetStreamFactory(factory StreamFactory) {
+	this.Wire.streamFactory = factory
+}
+
 func (this *Client) SetDefaultTimeout(timeout time.Duration) {
 	this.defaultTimeout = timeout
 }
@@ -1414,13 +1429,13 @@ func (this *Client) handshake(c net.Conn) error {
 	}
 	this.muhnd.RUnlock()
 
-	err := serializeHanshake(c, this.Wire.codec, time.Second, this.uuid, payload, this.metadata)
+	err := serializeHanshake(c, this.streamFactory, this.Wire.codec, time.Second, this.uuid, payload, this.metadata)
 	if err != nil {
 		return err
 	}
 
 	// get reply
-	uuid, group, remoteTopics, metadata, err := deserializeHandshake(c, this.Wire.codec, time.Second)
+	uuid, group, remoteTopics, metadata, err := deserializeHandshake(c, this.streamFactory, this.Wire.codec, time.Second)
 	if err != nil {
 		return err
 	}
@@ -1442,6 +1457,7 @@ func (this *Client) handshake(c net.Conn) error {
 
 func serializeHanshake(
 	c net.Conn,
+	factory StreamFactory,
 	codec Codec,
 	timeout time.Duration,
 	uuid tk.UUID,
@@ -1461,9 +1477,9 @@ func serializeHanshake(
 	c.SetWriteDeadline(timeouttime(timeout))
 
 	var w = bufio.NewWriter(c)
-	var os = NewOutputStream(w)
+	var os = factory.Output(w)
 	// uuid
-	_, err = os.writer.Write(uuid.Bytes())
+	_, err = os.Write(uuid.Bytes())
 	if err != nil {
 		return faults.Wrap(err)
 	}
@@ -1478,10 +1494,10 @@ func serializeHanshake(
 	return w.Flush()
 }
 
-func deserializeHandshake(c net.Conn, codec Codec, timeout time.Duration) (tk.UUID, string, map[string]bool, map[string]interface{}, error) {
+func deserializeHandshake(c net.Conn, factory StreamFactory, codec Codec, timeout time.Duration) (tk.UUID, string, map[string]bool, map[string]interface{}, error) {
 	c.SetReadDeadline(timeouttime(timeout))
 
-	r := NewInputStream(c)
+	r := factory.Input(c)
 	// remote uuid
 	var data, err = r.ReadNBytes(tk.UUID_SIZE)
 	if err != nil {
@@ -1737,6 +1753,7 @@ type Wires struct {
 	bufferSize         int
 	defaultTimeout     time.Duration
 	logger             log.ILogger
+	streamFactory      StreamFactory
 }
 
 type SendListener func(event SendEvent)
@@ -1761,13 +1778,14 @@ func (e TopicEvent) String() string {
 }
 
 // NewWires creates a Wires structure
-func NewWires(codec Codec, l log.ILogger) *Wires {
+func NewWires(codec Codec, l log.ILogger, factory StreamFactory) *Wires {
 	var wires = &Wires{
 		codec:          codec,
 		loadBalancer:   NewSimpleLB(),
 		bufferSize:     1000,
 		defaultTimeout: defTimeout,
 		logger:         Log{},
+		streamFactory:  factory,
 	}
 	wires.reset()
 	return wires
@@ -1781,6 +1799,17 @@ func (this *Wires) reset() {
 	this.dropTopicListeners = make(map[uint64]TopicListener)
 	this.cursor = 0
 	this.listenersIdx = 0
+}
+
+func (this *Wires) SetStreamFactory(factory StreamFactory) {
+	this.mu.Lock()
+	defer this.mu.Unlock()
+
+	this.streamFactory = factory
+	for _, v := range this.wires {
+		v.streamFactory = factory
+	}
+
 }
 
 func (this *Wires) SetLogger(l log.ILogger) {
@@ -2329,7 +2358,7 @@ func NewServer() *Server {
 		bindListeners: make(map[uint64]BindListener),
 		cherr:         make(chan error, 1),
 	}
-	server.Wires = NewWires(JsonCodec{}, Log{})
+	server.Wires = NewWires(JsonCodec{}, Log{}, BinStreamFactory{})
 	server.ClientServer = NewClientServer()
 	return server
 }
@@ -2399,7 +2428,7 @@ func (this *Server) Listen(service string) <-chan error {
 				this.cherr <- faults.Wrapf(err, "Stoped listening at %s", l.Addr())
 				return
 			}
-			wire := NewWire(this.codec, this.logger)
+			wire := NewWire(this.codec, this.logger, this.streamFactory)
 			wire.findHandlers = this.findHandlers
 
 			// topic exchange
@@ -2453,7 +2482,7 @@ func (this *Server) Port() int {
 
 func (this *Server) handshake(c net.Conn, wire *Wire) (string, map[string]bool, error) {
 	// get remote topics
-	uuid, group, payload, metadata, err := deserializeHandshake(c, wire.codec, time.Second)
+	uuid, group, payload, metadata, err := deserializeHandshake(c, this.streamFactory, wire.codec, time.Second)
 	if err != nil {
 		return "", nil, err
 	}
@@ -2475,7 +2504,7 @@ func (this *Server) handshake(c net.Conn, wire *Wire) (string, map[string]bool, 
 	}
 	this.muhnd.RUnlock()
 
-	err = serializeHanshake(c, wire.codec, time.Second, this.uuid, topics, this.metadata)
+	err = serializeHanshake(c, this.streamFactory, wire.codec, time.Second, this.uuid, topics, this.metadata)
 	if err != nil {
 		return "", nil, err
 	}

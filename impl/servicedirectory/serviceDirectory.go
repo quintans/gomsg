@@ -287,8 +287,8 @@ type Peer struct {
 func NewPeer(name string) *Peer {
 	node := &Peer{
 		name:         name,
-		Wires:        gomsg.NewWires(gomsg.JsonCodec{}, gomsg.Log{}),
-		dirs:         gomsg.NewWires(gomsg.JsonCodec{}, gomsg.Log{}),
+		Wires:        gomsg.NewWires(gomsg.JsonCodec{}, gomsg.Log{}, BinStreamFactory{}),
+		dirs:         gomsg.NewWires(gomsg.JsonCodec{}, gomsg.Log{}, BinStreamFactory{}),
 		peers:        make(map[string]*gomsg.Client),
 		PingInterval: time.Second,
 		PingFailures: 2,
